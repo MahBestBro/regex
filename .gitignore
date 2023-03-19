@@ -1,0 +1,5 @@
+/src/
+/zig-cache/
+/zig-out/
+/.vscode/
+build.zig
