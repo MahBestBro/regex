@@ -42,7 +42,7 @@ pub fn main() !void
  * `+` operator (1 or more repetitions).
  * `?` as optional (regular expression can either be there or not).
  * `[]` (everything in the square brackets are or'd not concatenated).
- ..- Also support ranges with `-` (e.g., `[a-z]` would mean anything from `a` to `z`).
+    - Also support ranges with `-` (e.g., `[a-z]` would mean anything from `a` to `z`).
 
 ## Potential future features
  * Subexpressions (probably with `{}`).
