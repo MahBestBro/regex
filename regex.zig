@@ -16,10 +16,10 @@ const PostfixOp = enum
     BRACKET, //Perhaps get rid of? Only needed in regexToPostfix
     CONCAT,
     OR,
-    KLEENE_STAR
+    KLEENE_STAR,
+    OPTIONAL
 };
 
-//TODO: Make op enum type so that . doesn't clash with regex  
 const PostfixElement = union(enum)
 {
     char: u8,
@@ -91,6 +91,20 @@ fn regexToPostfix(
                     return error.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .KLEENE_STAR };
+                result_at += 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
+                {
+                    result[result_at] = PostfixElement{ .op = stack.pop() };
+                    result_at += 1;
+                }
+                if (will_concat) try stack.append(.CONCAT);
+            },
+            '?' =>
+            {
+                if (i == 0 or !(std.ascii.isLower(regex_str[i - 1]) or regex_str[i - 1] == ')'))
+                    return error.UnaryOpWithNoArg;
+
+                result[result_at] = PostfixElement{ .op = .OPTIONAL };
                 result_at += 1;
                 if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
                 {
@@ -253,7 +267,6 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 new_state_index += 1;
                 
                 for (popped.dangling_ptrs.items) |ptr| ptr.* = new_state;
-                popped.dangling_ptrs.clearRetainingCapacity();
 
                 var frag = Frag
                 { 
@@ -262,6 +275,35 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 };
                 try frag.dangling_ptrs.append(&new_state.transitions.double[1].next);
                 try stack.append(frag);
+            },
+            .OPTIONAL =>
+            {
+                var popped = stack.pop();
+                
+                var new_state = &state_pool[new_state_index];
+                new_state.* = NfaState 
+                { 
+                    .id = new_state_index,
+                    .transitions = 
+                    .{
+                        .double = 
+                        .{
+                            .{ .char = null, .next = popped.start },
+                            .{ .char = null, .next = undefined },
+                        }
+                    }
+                };
+                new_state_index += 1;
+
+                var frag = Frag
+                { 
+                    .start = new_state, 
+                    .dangling_ptrs = PtrList.init(arena_allocator) 
+                };
+                try frag.dangling_ptrs.appendSlice(popped.dangling_ptrs.items);
+                try frag.dangling_ptrs.append(&new_state.transitions.double[1].next);
+                try stack.append(frag);
+
             },
             else => unreachable,
         }
@@ -607,6 +649,24 @@ test "createNFA"
         try testing.expect(last.transitions == .final);
     }
 
+    const optional = try createNFA("a?", testing.allocator);
+    defer testing.allocator.free(optional.state_pool);
+    try testing.expect(!nfaHasDuplicateIDs(optional));
+
+    {
+        const first = optional.start;
+        try testing.expect(first.transitions == .double);
+        
+        const char_route = first.transitions.double[0].next.*;
+        try testing.expect(char_route.transitions == .single);
+        try testing.expect(char_route.transitions.single.char.? == 'a');
+
+        const last = first.transitions.double[1].next.*;
+        try testing.expectEqual(char_route.transitions.single.next.*, last);
+        try testing.expect(last.transitions == .final);
+    }
+
+
     const big_boi = try createNFA("b|ab(a*|b)", testing.allocator);
     defer testing.allocator.free(big_boi.state_pool);
     try testing.expect(!nfaHasDuplicateIDs(big_boi));
@@ -650,15 +710,23 @@ test "or"
     try testing.expect(outside_bracket.match("ab"));
     try testing.expect(!outside_bracket.match("b"));
     try testing.expect(!outside_bracket.match("aa"));
-
     
-    //TODO: Bug fix! Compiling this regex causes a seg fault.
     const inside_bracket = try Regex.compile("a(a|b)", testing.allocator);
     defer inside_bracket.deinit();
     try testing.expect(inside_bracket.match("aa"));
     try testing.expect(inside_bracket.match("ab"));
     try testing.expect(!inside_bracket.match("a"));
     try testing.expect(!inside_bracket.match("b"));
+
+    const multiple_ors = try Regex.compile("a|b|c", testing.allocator);
+    defer multiple_ors.deinit();
+    try testing.expect(multiple_ors.match("a"));
+    try testing.expect(multiple_ors.match("b"));
+    try testing.expect(multiple_ors.match("c"));
+    try testing.expect(!multiple_ors.match(""));
+    try testing.expect(!multiple_ors.match("ab"));
+    try testing.expect(!multiple_ors.match("bc"));
+    try testing.expect(!multiple_ors.match("ac"));
 }
 
 test "kleene star"
@@ -704,6 +772,59 @@ test "kleene star"
     try testing.expect(!bracketed.match("b"));
     try testing.expect(!bracketed.match("aab"));
     try testing.expect(!bracketed.match("abb"));
+}
+
+test "optional"
+{
+    const sanity_check = try Regex.compile("a?", testing.allocator);
+    defer sanity_check.deinit();
+    try testing.expect(sanity_check.match(""));
+    try testing.expect(sanity_check.match("a"));
+    try testing.expect(!sanity_check.match("aa"));
+    try testing.expect(!sanity_check.match("b"));
+
+    const before_concat = try Regex.compile("a?b", testing.allocator);
+    defer before_concat.deinit();
+    try testing.expect(before_concat.match("b"));
+    try testing.expect(before_concat.match("ab"));
+    try testing.expect(!before_concat.match("aab"));
+    try testing.expect(!before_concat.match("a"));
+    try testing.expect(!before_concat.match(""));
+
+    const after_concat = try Regex.compile("ab?", testing.allocator);
+    defer after_concat.deinit();
+    try testing.expect(after_concat.match("a"));
+    try testing.expect(after_concat.match("ab"));
+    try testing.expect(!after_concat.match("abb"));
+    try testing.expect(!after_concat.match("b"));
+    try testing.expect(!after_concat.match(""));
+
+    const with_bracket = try Regex.compile("(ab)?", testing.allocator);
+    defer with_bracket.deinit();
+    try testing.expect(with_bracket.match(""));
+    try testing.expect(with_bracket.match("ab"));
+    try testing.expect(!with_bracket.match("a"));
+    try testing.expect(!with_bracket.match("b"));
+    try testing.expect(!with_bracket.match("abab"));
+
+    const in_or = try Regex.compile("a|b?", testing.allocator);
+    defer in_or.deinit();
+    try testing.expect(in_or.match(""));
+    try testing.expect(in_or.match("a"));
+    try testing.expect(in_or.match("b"));
+    try testing.expect(!in_or.match("ab"));
+
+    const with_kleene_star = try Regex.compile("(ab?)*", testing.allocator);
+    defer with_kleene_star.deinit();
+    try testing.expect(with_kleene_star.match(""));
+    try testing.expect(with_kleene_star.match("a"));
+    try testing.expect(with_kleene_star.match("ab"));
+    try testing.expect(with_kleene_star.match("aa"));
+    try testing.expect(with_kleene_star.match("aab"));
+    try testing.expect(with_kleene_star.match("aba"));
+    try testing.expect(with_kleene_star.match("abab"));
+    try testing.expect(!with_kleene_star.match("b"));
+    try testing.expect(!with_kleene_star.match("abb"));
 }
 
 
