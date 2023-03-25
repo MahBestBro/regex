@@ -35,12 +35,12 @@ pub fn main() !void
  The following regex operators are supported as of current:
  * `|` - If `R` and `S` are regular expressions, then `R|S` matches `R` or `S`.
  * `*` - If `R` is a regular expression, then `R*` matches 0 or more repitions of `R`.
+ * `+` - Same as `*` but 1 or more repetitions.
+ * `?` - If `R` is a regular expression, then `R?` matches 1 or no appearances if `R`
 
 ## Features to be added
  * Support for all ascii characters (this also implies the addition of `\` as an escape character).
  * `.` as wildcard (any character).
- * `+` operator (1 or more repetitions).
- * `?` as optional (regular expression can either be there or not).
  * `[]` (everything in the square brackets are or'd not concatenated).
     - Also support ranges with `-` (e.g., `[a-z]` would mean anything from `a` to `z`).
 

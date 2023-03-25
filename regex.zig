@@ -17,7 +17,8 @@ const PostfixOp = enum
     CONCAT,
     OR,
     KLEENE_STAR,
-    OPTIONAL
+    OPTIONAL,
+    PLUS
 };
 
 const PostfixElement = union(enum)
@@ -105,6 +106,20 @@ fn regexToPostfix(
                     return error.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .OPTIONAL };
+                result_at += 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
+                {
+                    result[result_at] = PostfixElement{ .op = stack.pop() };
+                    result_at += 1;
+                }
+                if (will_concat) try stack.append(.CONCAT);
+            },
+            '+' =>
+            {
+                if (i == 0 or !(std.ascii.isLower(regex_str[i - 1]) or regex_str[i - 1] == ')'))
+                    return error.UnaryOpWithNoArg;
+
+                result[result_at] = PostfixElement{ .op = .PLUS };
                 result_at += 1;
                 if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
                 {
@@ -304,6 +319,30 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 try frag.dangling_ptrs.append(&new_state.transitions.double[1].next);
                 try stack.append(frag);
 
+            },
+            .PLUS =>
+            {
+                var top = &stack.items[stack.items.len - 1];
+
+                var new_state = &state_pool[new_state_index];
+                new_state.* = NfaState 
+                { 
+                    .id = new_state_index,
+                    .transitions = 
+                    .{
+                        .double = 
+                        .{
+                            .{ .char = null, .next = top.start },
+                            .{ .char = null, .next = undefined },
+                        }
+                    }
+                };
+                new_state_index += 1;
+
+                for (top.dangling_ptrs.items) |ptr| ptr.* = new_state;
+                top.dangling_ptrs.clearRetainingCapacity();
+                
+                try top.dangling_ptrs.append(&new_state.transitions.double[1].next);
             },
             else => unreachable,
         }
@@ -666,6 +705,22 @@ test "createNFA"
         try testing.expect(last.transitions == .final);
     }
 
+    const plus = try createNFA("a+", testing.allocator);
+    defer testing.allocator.free(plus.state_pool);
+    try testing.expect(!nfaHasDuplicateIDs(plus));
+
+    {
+        const first = plus.start;
+        try testing.expect(first.transitions == .single);
+        try testing.expect(first.transitions.single.char.? == 'a');
+        
+        const loop = first.transitions.single.next.*;
+        try testing.expect(loop.transitions == .double);
+        try testing.expectEqual(loop.transitions.double[0].next.*, first);
+
+        const last = loop.transitions.double[1].next.*;
+        try testing.expect(last.transitions == .final);
+    }
 
     const big_boi = try createNFA("b|ab(a*|b)", testing.allocator);
     defer testing.allocator.free(big_boi.state_pool);
@@ -756,6 +811,7 @@ test "kleene star"
     for (aaaaab) |_, i| 
         try testing.expect(end_concat.match(aaaaab[aaaaab.len - i - 1..aaaaab.len]));
     try testing.expect(!end_concat.match(""));
+    try testing.expect(!end_concat.match("a"));
     try testing.expect(!end_concat.match("aa"));
     try testing.expect(!end_concat.match("ba"));
     try testing.expect(!end_concat.match("abb"));
@@ -765,7 +821,8 @@ test "kleene star"
     const ababab = "ab" ** 100;
     {
         var i: usize = 0;
-        while (i <= ababab.len) : (i += 2) try testing.expect(bracketed.match(ababab[0..i]));
+        while (i <= ababab.len) : (i += 2) 
+            try testing.expect(bracketed.match(ababab[0..i]));
     }
     try testing.expect(bracketed.match(ababab));
     try testing.expect(!bracketed.match("a"));
@@ -827,7 +884,61 @@ test "optional"
     try testing.expect(!with_kleene_star.match("abb"));
 }
 
+test "plus"
+{
+    const sanity_check = try Regex.compile("a+", testing.allocator);
+    defer sanity_check.deinit();
+    const aaaaaa = "a" ** 100;
+    for (aaaaaa) |_, i| try testing.expect(sanity_check.match(aaaaaa[0..i+1]));
+    try testing.expect(!sanity_check.match(""));
+    try testing.expect(!sanity_check.match("b"));
+    try testing.expect(!sanity_check.match("ab"));
+    try testing.expect(!sanity_check.match("aab"));
 
+    const start_concat = try Regex.compile("ab+", testing.allocator);
+    defer start_concat.deinit();
+    const abbbbb = "a" ++ "b" ** 100;
+    {
+        var i: usize = 1;
+        while (i < abbbbb.len) : (i += 1) 
+            try testing.expect(start_concat.match(abbbbb[0..i + 1]));
+    }
+    try testing.expect(!start_concat.match(""));
+    try testing.expect(!start_concat.match("a"));
+    try testing.expect(!start_concat.match("b"));
+    try testing.expect(!start_concat.match("aa"));
+    try testing.expect(!start_concat.match("aba"));
+    try testing.expect(!start_concat.match("aab"));
+
+    const end_concat = try Regex.compile("a+b", testing.allocator);
+    defer end_concat.deinit();
+    const aaaaab = aaaaaa ++ "b";
+    {
+        var i: usize = 1;
+        while (i < aaaaab.len) : (i += 1) 
+            try testing.expect(end_concat.match(aaaaab[aaaaab.len - i - 1..aaaaab.len]));
+    }
+    try testing.expect(!end_concat.match(""));
+    try testing.expect(!end_concat.match("a"));
+    try testing.expect(!end_concat.match("b"));
+    try testing.expect(!end_concat.match("aa"));
+    try testing.expect(!end_concat.match("ba"));
+    try testing.expect(!end_concat.match("abb"));
+
+    const bracketed = try Regex.compile("(ab)+", testing.allocator);
+    defer bracketed.deinit();
+    const ababab = "ab" ** 100;
+    {
+        var i: usize = 2;
+        while (i <= ababab.len) : (i += 2) 
+            try testing.expect(bracketed.match(ababab[0..i]));
+    }
+    try testing.expect(!bracketed.match(""));
+    try testing.expect(!bracketed.match("a"));
+    try testing.expect(!bracketed.match("b"));
+    try testing.expect(!bracketed.match("aab"));
+    try testing.expect(!bracketed.match("abb"));
+}
 
 //MIT License
 //
