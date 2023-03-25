@@ -377,14 +377,14 @@ fn fillEmptyTransitions(
     arena_allocator: std.mem.Allocator
 ) !void
 {
-    var states_to_traverse = std.AutoHashMap(NfaState, void).init(arena_allocator);
-    try states_to_traverse.put(start, {});
+    var states_to_traverse = std.ArrayList(NfaState).init(arena_allocator);
+    try states_to_traverse.append(start);
+    var next_to_traverse: usize = 0;
 
     //Go through all the empty transitions
-    while (states_to_traverse.count() > 0)
+    while (next_to_traverse < states_to_traverse.items.len)
     {
-        var current_states = states_to_traverse.keyIterator();
-        while (current_states.next()) |state|
+        for (states_to_traverse.items[next_to_traverse..]) |state|
         {
             state_set.set(state.id);
             switch(state.transitions)
@@ -392,18 +392,17 @@ fn fillEmptyTransitions(
                 .single => 
                 {
                     const t = state.transitions.single; 
-                    if (t.char == null) try states_to_traverse.put(t.next.*, {});
-
+                    if (t.char == null) try states_to_traverse.append(t.next.*);
                 },
                 .double =>
                 {
                     const t = state.transitions.double;
-                    if (t[0].char == null) try states_to_traverse.put(t[0].next.*, {});
-                    if (t[1].char == null) try states_to_traverse.put(t[1].next.*, {});
+                    if (t[0].char == null) try states_to_traverse.append(t[0].next.*);
+                    if (t[1].char == null) try states_to_traverse.append(t[1].next.*);
                 },
                 .final => {}
             }
-            states_to_traverse.removeByPtr(state);
+            next_to_traverse += 1;
         }
     }
 }
