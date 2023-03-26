@@ -153,6 +153,9 @@ const NfaState = struct
 
     id: usize,
 
+    //TODO: Maybe edit double just to be 2 pointers? The char is always null. Also
+    //maybe edit single just to be a transition with a normal char as they're never
+    //null.
     transitions: union(enum)
     {
         single: NfaTransition,
@@ -533,7 +536,12 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
 
 pub const Regex = struct
 {
-    dfa: DFA,
+    //NOTE: From benchmarks I've done myself at least, using a DFA is faster for matching
+    //with the added cost of a little bit more compile time (though the speed up you get
+    //looks to be much worth the extra compile time) and memory. If need be, we could
+    //potentially have an option to just use the NFA, though I doubt this will ever be
+    //a serious need.
+    dfa: DFA,  
     allocator: std.mem.Allocator,
 
     pub fn compile(regex_str: []const u8, allocator: std.mem.Allocator) !Regex
@@ -561,8 +569,6 @@ pub const Regex = struct
     }
 };
 
-
-//TODO: Benchmark NFA vs DFA matching 
 
 const testing = std.testing;
 
