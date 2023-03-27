@@ -161,6 +161,39 @@ const NfaState = struct
         single: NfaTransition,
         double: [2]NfaTransition,
         final: void
+    },
+
+    pub fn single(id: usize, char: u8, next: *NfaState) NfaState
+    {
+        return NfaState
+        {
+            .id = id,
+            .transitions = 
+            .{
+                .single = .{ .char = char, .next = next },
+            }
+        };
+    }
+
+    pub fn double(id: usize, next1: *NfaState, next2: *NfaState) NfaState
+    {
+        return NfaState
+        {
+            .id = id,
+            .transitions = 
+            .{
+                .double = 
+                .{
+                    .{ .char = null, .next = next1 },
+                    .{ .char = null, .next = next2 },
+                }
+            }
+        };
+    }
+
+    pub fn final(id: usize) NfaState
+    {
+        return NfaState{ .id = id, .transitions = .{ .final = {} } };
     }
 };
 
@@ -203,14 +236,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
         if (el == .char)
         {
             var new_state = &state_pool[new_state_index];
-            new_state.* = NfaState
-            { 
-                .id = new_state_index,
-                .transitions = 
-                .{
-                    .single = .{ .char = el.char, .next = undefined } 
-                }
-            };
+            new_state.* = NfaState.single(new_state_index, el.char, undefined);
             new_state_index += 1;
             
             var frag = Frag
@@ -242,18 +268,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 const rhs = stack.pop();
 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState 
-                { 
-                    .id = new_state_index,
-                    .transitions = 
-                    .{
-                        .double = 
-                        .{
-                            .{ .char = null, .next = lhs.start },
-                            .{ .char = null, .next = rhs.start },
-                        }
-                    }
-                };
+                new_state.* = NfaState.double(new_state_index, lhs.start, rhs.start);
                 new_state_index += 1;
 
                 var frag = Frag
@@ -270,18 +285,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 var popped = stack.pop();
                 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState 
-                { 
-                    .id = new_state_index,
-                    .transitions = 
-                    .{
-                        .double = 
-                        .{
-                            .{ .char = null, .next = popped.start },
-                            .{ .char = null, .next = undefined },
-                        }
-                    }
-                };
+                new_state.* = NfaState.double(new_state_index, popped.start, undefined);
                 new_state_index += 1;
                 
                 for (popped.dangling_ptrs.items) |ptr| ptr.* = new_state;
@@ -299,18 +303,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 var popped = stack.pop();
                 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState 
-                { 
-                    .id = new_state_index,
-                    .transitions = 
-                    .{
-                        .double = 
-                        .{
-                            .{ .char = null, .next = popped.start },
-                            .{ .char = null, .next = undefined },
-                        }
-                    }
-                };
+                new_state.* = NfaState.double(new_state_index, popped.start, undefined);
                 new_state_index += 1;
 
                 var frag = Frag
@@ -328,18 +321,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 var top = &stack.items[stack.items.len - 1];
 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState 
-                { 
-                    .id = new_state_index,
-                    .transitions = 
-                    .{
-                        .double = 
-                        .{
-                            .{ .char = null, .next = top.start },
-                            .{ .char = null, .next = undefined },
-                        }
-                    }
-                };
+                new_state.* = NfaState.double(new_state_index, top.start, undefined);
                 new_state_index += 1;
 
                 for (top.dangling_ptrs.items) |ptr| ptr.* = new_state;
@@ -355,7 +337,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
 
     var result = stack.pop();
     const match_state = &state_pool[new_state_index];
-    match_state.* = NfaState{ .id = new_state_index, .transitions = .{ .final = {} } };
+    match_state.* = NfaState.final(new_state_index);
     new_state_index += 1;
     for (result.dangling_ptrs.items) |ptr| ptr.* = match_state;
 
@@ -392,16 +374,13 @@ fn fillEmptyTransitions(
             state_set.set(state.id);
             switch(state.transitions)
             {
-                .single => 
+                .single => |t| assert(t.char != null),
+                .double => |t|
                 {
-                    const t = state.transitions.single; 
-                    if (t.char == null) try states_to_traverse.append(t.next.*);
-                },
-                .double =>
-                {
-                    const t = state.transitions.double;
-                    if (t[0].char == null) try states_to_traverse.append(t[0].next.*);
-                    if (t[1].char == null) try states_to_traverse.append(t[1].next.*);
+                    assert(t[0].char == null and t[1].char == null);
+
+                    try states_to_traverse.append(t[0].next.*);
+                    try states_to_traverse.append(t[1].next.*);
                 },
                 .final => {}
             }
@@ -461,17 +440,8 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
                 const current_transitions = nfa.state_pool[state_id].transitions;
                 switch(current_transitions)
                 {
-                    .single => 
-                    {
-                        const t = current_transitions.single; 
-                        if (t.char == char) next_state_set.set(t.next.id);
-                    },
-                    .double =>
-                    {
-                        const t = current_transitions.double;
-                        if (t[0].char == char) next_state_set.set(t[0].next.id);
-                        if (t[1].char == char) next_state_set.set(t[1].next.id);
-                    },
+                    .single => |t| if (t.char == char) next_state_set.set(t.next.id),
+                    .double => |t| assert(t[0].char == null and t[1].char == null),
                     .final => continue
                 }
             } 
