@@ -5,6 +5,9 @@
  
  This library was mainly inspired by the rough implementation of Ken Thompson's algorithm outlined in [this article](https://swtch.com/~rsc/regexp/regexp1.html) by Russ Cox, though not everything is based off it.
 
+## Getting Started
+ Just download the `regex.zig` file and include it into your project however you want.  
+
 ## Example Usage
 ```zig
 const std = @import("std");
@@ -15,10 +18,10 @@ pub fn main() !void
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const inside_bracket = try regex.Regex.compile("ab*c", arena.allocator());
-    defer inside_bracket.deinit();
+    const rx = try regex.Regex.compile("ab*c", arena.allocator());
+    defer rx.deinit();
     
-    if (inside_bracket.match("abc")) 
+    if (rx.match("abc")) 
     {
         std.debug.print("Hooray!\n", .{});
     } 
