@@ -36,14 +36,16 @@ pub fn main() !void
  Like all regular expressions, non-operator characters which are next to each other concatenate (so `abc` would match "abc"). Brackets are denoted by normal parenthesis (i.e., `()`).
 
  The following regex operators are supported as of current:
- * `|` - If `R` and `S` are regular expressions, then `R|S` matches `R` or `S`.
+ * `|` - If `R` and `S` are regular expressions, then `R|S` matches `R` or `S` (Note: This has the highest precedence, so `a|bc*` is equivalent to `a|(bc*)`, not `(a|b)c*`).
  * `*` - If `R` is a regular expression, then `R*` matches 0 or more repitions of `R`.
  * `+` - Same as `*` but 1 or more repetitions.
  * `?` - If `R` is a regular expression, then `R?` matches 1 or no appearances if `R`
 
+ Currently, the following are unique characters with their own special properties:
+ * `.` - represents any character. 
+
 ## Features to be added
  * Support for all ascii characters (this also implies the addition of `\` as an escape character).
- * `.` as wildcard (any character).
  * `[]` (everything in the square brackets are or'd not concatenated).
     - Also support ranges with `-` (e.g., `[a-z]` would mean anything from `a` to `z`).
 

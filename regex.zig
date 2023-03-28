@@ -8,8 +8,14 @@ const assert = std.debug.assert;
 //const MAX_CHARS = std.math.maxInt(u8) / 2;
 const MAX_CHARS = 26;
 
-//TODO: Move all of these into Regex struct because probs not gonna be used anywhere 
-//else?
+const RegexSymbol = union(enum)
+{
+    char: u8,
+    wildcard: void,
+
+    //TODO: Once we start adding in ranges, have a "check" helper function that just 
+    //takes in a char and returns whether the symbol matches it or not 
+};
 
 const PostfixOp = enum
 {
@@ -23,7 +29,7 @@ const PostfixOp = enum
 
 const PostfixElement = union(enum)
 {
-    char: u8,
+    symbol: RegexSymbol,
     op: PostfixOp
 };
 
@@ -41,6 +47,7 @@ fn regexToPostfix(
     var result_at: usize = 0;
     var result = try postfix_allocator.alloc(PostfixElement, 2 * regex_str.len - 1);
     var stack = std.ArrayList(PostfixOp).init(allocator);
+    var last_added_is_expr = false;
     for (regex_str) |char, i|
     {
         const will_concat = i < regex_str.len - 1 and 
@@ -51,8 +58,16 @@ fn regexToPostfix(
         {
             'a'...'z' => 
             {
-                result[result_at] = PostfixElement{ .char = char };
+                result[result_at] = PostfixElement{ .symbol = RegexSymbol{ .char = char } };
                 result_at += 1;
+                last_added_is_expr = true;
+                if (will_concat) try stack.append(.CONCAT);
+            },
+            '.' =>
+            {
+                result[result_at] = PostfixElement{ .symbol = RegexSymbol{ .wildcard = {} } };
+                result_at += 1;
+                last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
             },
             '(' => try stack.append(.BRACKET),
@@ -72,6 +87,7 @@ fn regexToPostfix(
                 }
                 if (!found_closing_bracket) return error.MissmatchedClosingBracket;
 
+                last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
             },
             '|' =>
@@ -84,12 +100,13 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = stack.pop() };
                     result_at += 1;
                 }
+
+                last_added_is_expr = false;
                 try stack.append(.OR);
             },
             '*' => 
             {
-                if (i == 0 or !(std.ascii.isLower(regex_str[i - 1]) or regex_str[i - 1] == ')'))
-                    return error.UnaryOpWithNoArg;
+                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .KLEENE_STAR };
                 result_at += 1;
@@ -98,12 +115,13 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = stack.pop() };
                     result_at += 1;
                 }
+
+                last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
             '?' =>
             {
-                if (i == 0 or !(std.ascii.isLower(regex_str[i - 1]) or regex_str[i - 1] == ')'))
-                    return error.UnaryOpWithNoArg;
+                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .OPTIONAL };
                 result_at += 1;
@@ -112,12 +130,13 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = stack.pop() };
                     result_at += 1;
                 }
+
+                last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
             '+' =>
             {
-                if (i == 0 or !(std.ascii.isLower(regex_str[i - 1]) or regex_str[i - 1] == ')'))
-                    return error.UnaryOpWithNoArg;
+                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .PLUS };
                 result_at += 1;
@@ -126,6 +145,8 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = stack.pop() };
                     result_at += 1;
                 }
+
+                last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
             else => return error.UnknownRegexSymbol
@@ -138,7 +159,7 @@ fn regexToPostfix(
         result[result_at] = PostfixElement{ .op = op };
         result_at += 1;
     }
-    assert(result_at == 1 or result[result_at - 1] != .char);
+    assert(result_at == 1 or result[result_at - 1] != .symbol);
 
     return result[0..result_at];
 }
@@ -147,14 +168,14 @@ const NfaState = struct
 {
     const NfaTransition = struct
     {
-        char: ?u8, //If null, then it is an empty transition
+        symbol: ?RegexSymbol, //If null, then it is an empty transition
         next: *NfaState,
     };
 
     id: usize,
 
-    //TODO: Maybe edit double just to be 2 pointers? The char is always null. Also
-    //maybe edit single just to be a transition with a normal char as they're never
+    //TODO: Maybe edit double just to be 2 pointers? The symbol is always null. Also
+    //maybe edit single just to be a transition with a normal symbol as they're never
     //null.
     transitions: union(enum)
     {
@@ -163,14 +184,14 @@ const NfaState = struct
         final: void
     },
 
-    pub fn single(id: usize, char: u8, next: *NfaState) NfaState
+    pub fn single(id: usize, symbol: RegexSymbol, next: *NfaState) NfaState
     {
         return NfaState
         {
             .id = id,
             .transitions = 
             .{
-                .single = .{ .char = char, .next = next },
+                .single = .{ .symbol = symbol, .next = next },
             }
         };
     }
@@ -184,8 +205,8 @@ const NfaState = struct
             .{
                 .double = 
                 .{
-                    .{ .char = null, .next = next1 },
-                    .{ .char = null, .next = next2 },
+                    .{ .symbol = null, .next = next1 },
+                    .{ .symbol = null, .next = next2 },
                 }
             }
         };
@@ -233,10 +254,10 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
     var stack = std.ArrayList(Frag).init(arena_allocator);
     for (postfix) |el|
     {
-        if (el == .char)
+        if (el == .symbol)
         {
             var new_state = &state_pool[new_state_index];
-            new_state.* = NfaState.single(new_state_index, el.char, undefined);
+            new_state.* = NfaState.single(new_state_index, el.symbol, undefined);
             new_state_index += 1;
             
             var frag = Frag
@@ -374,10 +395,10 @@ fn fillEmptyTransitions(
             state_set.set(state.id);
             switch(state.transitions)
             {
-                .single => |t| assert(t.char != null),
+                .single => |t| assert(t.symbol != null),
                 .double => |t|
                 {
-                    assert(t[0].char == null and t[1].char == null);
+                    assert(t[0].symbol == null and t[1].symbol == null);
 
                     try states_to_traverse.append(t[0].next.*);
                     try states_to_traverse.append(t[1].next.*);
@@ -440,8 +461,12 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
                 const current_transitions = nfa.state_pool[state_id].transitions;
                 switch(current_transitions)
                 {
-                    .single => |t| if (t.char == char) next_state_set.set(t.next.id),
-                    .double => |t| assert(t[0].char == null and t[1].char == null),
+                    .single => |t| 
+                    {
+                        if (t.symbol.? == .wildcard or t.symbol.?.char == char) 
+                            next_state_set.set(t.next.id);
+                    },
+                    .double => |t| assert(t[0].symbol == null and t[1].symbol == null),
                     .final => continue
                 }
             } 
@@ -504,6 +529,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
     return dfa;
 }
 
+//TODO: Make this file scope?
 pub const Regex = struct
 {
     //NOTE: From benchmarks I've done myself at least, using a DFA is faster for matching
@@ -540,7 +566,21 @@ pub const Regex = struct
 };
 
 
+
+
+
+
 const testing = std.testing;
+
+fn pfChar(char: u8) PostfixElement
+{
+    return PostfixElement{ .symbol = RegexSymbol{ .char = char } };
+}
+
+//fn wildcard() RegexSymbol
+//{
+//    return RegexSymbol{ .wildcard = {} };
+//}
 
 test "regexToPostfix"
 {
@@ -552,8 +592,8 @@ test "regexToPostfix"
     try testing.expectEqualSlices(
         PostfixElement, 
         &[_]PostfixElement{ 
-            .{ .char = 'a' }, .{ .char = 'b' }, .{ .char = 'b' }, .{ .op = .CONCAT },
-            .{ .op = .CONCAT }, .{ .char = 'a' }, .{ .op = .OR }
+            pfChar('a'), pfChar('b'), pfChar('b'), .{ .op = .CONCAT },
+            .{ .op = .CONCAT }, pfChar('a'), .{ .op = .OR }
         },
         test1
     );
@@ -563,8 +603,8 @@ test "regexToPostfix"
     try testing.expectEqualSlices(
         PostfixElement, 
         &[_]PostfixElement{ 
-            .{ .char = 'a' }, .{ .char = 'b' }, .{ .char = 'b' }, .{ .op = .CONCAT },
-            .{ .op = .KLEENE_STAR }, .{ .op = .CONCAT }, .{ .char = 'a' }, 
+            pfChar('a'), pfChar('b'), pfChar('b'), .{ .op = .CONCAT },
+            .{ .op = .KLEENE_STAR }, .{ .op = .CONCAT }, pfChar('a'), 
             .{ .op = .CONCAT }
         },
         test2
@@ -575,8 +615,8 @@ test "regexToPostfix"
     try testing.expectEqualSlices(
         PostfixElement, 
         &[_]PostfixElement{ 
-            .{ .char = 'b' }, .{ .char = 'a' }, .{ .char = 'b' }, .{ .char = 'a' }, 
-            .{ .op = .KLEENE_STAR }, .{ .char = 'b' }, .{ .op = .OR }, 
+            pfChar('b'), pfChar('a'), pfChar('b'), pfChar('a'), 
+            .{ .op = .KLEENE_STAR }, pfChar('b'), .{ .op = .OR }, 
             .{ .op = .CONCAT }, .{ .op = .CONCAT }, .{ .op = .OR }, 
         },
         test3
@@ -604,7 +644,7 @@ test "createNFA"
     {
         const first = single.start;
         try testing.expect(first.transitions == .single);
-        try testing.expect(first.transitions.single.char.? == 'a');
+        try testing.expect(first.transitions.single.symbol.?.char == 'a');
         const last = first.transitions.single.next.*;
         try testing.expect(last.transitions == .final);
     }
@@ -616,10 +656,10 @@ test "createNFA"
     {
         const first = concat.start;
         try testing.expect(first.transitions == .single);
-        try testing.expect(first.transitions.single.char.? == 'a');
+        try testing.expect(first.transitions.single.symbol.?.char == 'a');
         const second = first.transitions.single.next.*;
         try testing.expect(second.transitions == .single);
-        try testing.expect(second.transitions.single.char.? == 'b');
+        try testing.expect(second.transitions.single.symbol.?.char == 'b');
         const last = second.transitions.single.next.*;
         try testing.expect(last.transitions == .final);
     }
@@ -635,10 +675,10 @@ test "createNFA"
         
         const a_route = first.transitions.double[1].next.*;
         try testing.expect(a_route.transitions == .single);
-        try testing.expect(a_route.transitions.single.char.? == 'a');
+        try testing.expect(a_route.transitions.single.symbol.?.char == 'a');
         const b_route = first.transitions.double[0].next.*;
         try testing.expect(b_route.transitions == .single);
-        try testing.expect(b_route.transitions.single.char.? == 'b');
+        try testing.expect(b_route.transitions.single.symbol.?.char == 'b');
         try testing.expect(a_route.transitions.single.next == b_route.transitions.single.next);
 
         const last = a_route.transitions.single.next.*;
@@ -656,7 +696,7 @@ test "createNFA"
         
         const loop = first.transitions.double[0].next.*;
         try testing.expect(loop.transitions == .single);
-        try testing.expect(loop.transitions.single.char.? == 'a');
+        try testing.expect(loop.transitions.single.symbol.?.char == 'a');
         try testing.expectEqual(loop.transitions.single.next.*, first);
 
         const last = first.transitions.double[1].next.*;
@@ -671,12 +711,12 @@ test "createNFA"
         const first = optional.start;
         try testing.expect(first.transitions == .double);
         
-        const char_route = first.transitions.double[0].next.*;
-        try testing.expect(char_route.transitions == .single);
-        try testing.expect(char_route.transitions.single.char.? == 'a');
+        const symbol_route = first.transitions.double[0].next.*;
+        try testing.expect(symbol_route.transitions == .single);
+        try testing.expect(symbol_route.transitions.single.symbol.?.char == 'a');
 
         const last = first.transitions.double[1].next.*;
-        try testing.expectEqual(char_route.transitions.single.next.*, last);
+        try testing.expectEqual(symbol_route.transitions.single.next.*, last);
         try testing.expect(last.transitions == .final);
     }
 
@@ -687,7 +727,7 @@ test "createNFA"
     {
         const first = plus.start;
         try testing.expect(first.transitions == .single);
-        try testing.expect(first.transitions.single.char.? == 'a');
+        try testing.expect(first.transitions.single.symbol.?.char == 'a');
         
         const loop = first.transitions.single.next.*;
         try testing.expect(loop.transitions == .double);
@@ -757,6 +797,16 @@ test "or"
     try testing.expect(!multiple_ors.match("ab"));
     try testing.expect(!multiple_ors.match("bc"));
     try testing.expect(!multiple_ors.match("ac"));
+
+    const precedence_check = try Regex.compile("a|bc*", testing.allocator);
+    defer precedence_check.deinit();
+    try testing.expect(precedence_check.match("a"));
+    try testing.expect(precedence_check.match("b"));
+    try testing.expect(precedence_check.match("bc"));
+    try testing.expect(precedence_check.match("bcccccccccc"));
+    try testing.expect(!precedence_check.match(""));
+    try testing.expect(!precedence_check.match("ac"));
+    try testing.expect(!precedence_check.match("acc"));
 }
 
 test "kleene star"
@@ -913,6 +963,72 @@ test "plus"
     try testing.expect(!bracketed.match("b"));
     try testing.expect(!bracketed.match("aab"));
     try testing.expect(!bracketed.match("abb"));
+}
+
+test "wildcard"
+{
+    const alphabet = "abcdefghijklmnopqrstuvwxyz";
+    const qwerty = "qwertyuiopasdfghjklzxcvbnm";
+
+    const sanity_check = try Regex.compile(".", testing.allocator);
+    defer sanity_check.deinit();
+    for (alphabet) |_, i| try testing.expect(sanity_check.match(alphabet[i..i+1]));
+    for (qwerty)   |_, i| try testing.expect(sanity_check.match(qwerty[i..i+1]));
+    try testing.expect(!sanity_check.match(""));
+    try testing.expect(!sanity_check.match("aa"));
+    try testing.expect(!sanity_check.match("bb"));
+    try testing.expect(!sanity_check.match("az"));
+
+    const with_concat = try Regex.compile(".b", testing.allocator);
+    defer with_concat.deinit();
+    var input = [_]u8 {0, 'b'};
+    for (alphabet) |c, i| 
+    {
+        input[0] = c;
+        try testing.expect(with_concat.match(&input));
+        try testing.expect(!with_concat.match(alphabet[i..i+1]));
+    }
+    try testing.expect(!with_concat.match(""));
+    try testing.expect(!with_concat.match("aa"));
+    try testing.expect(!with_concat.match("ba"));
+
+    const with_optional = try Regex.compile(".?", testing.allocator);
+    defer with_optional.deinit();
+    for (alphabet) |_, i| try testing.expect(with_optional.match(alphabet[i..i+1]));
+    for (qwerty)   |_, i| try testing.expect(with_optional.match(qwerty[i..i+1]));
+    try testing.expect(with_optional.match(""));
+    try testing.expect(!with_optional.match("aa"));
+    try testing.expect(!with_optional.match("bb"));
+    try testing.expect(!with_optional.match("az"));
+
+    const with_or = try Regex.compile(".|ab", testing.allocator);
+    defer with_or.deinit();
+    for (alphabet) |_, i| try testing.expect(with_optional.match(alphabet[i..i+1]));
+    for (qwerty)   |_, i| try testing.expect(with_optional.match(qwerty[i..i+1]));
+    try testing.expect(with_or.match("ab"));
+    try testing.expect(!with_or.match(""));
+    try testing.expect(!with_or.match("aa"));
+    try testing.expect(!with_or.match("bb"));
+    try testing.expect(!with_or.match("az"));
+
+    const with_star = try Regex.compile(".*", testing.allocator);
+    defer with_star.deinit();
+    try testing.expect(with_star.match(alphabet));
+    try testing.expect(with_star.match(alphabet ** 2));
+    try testing.expect(with_star.match(qwerty));
+    try testing.expect(with_star.match(qwerty ** 4));
+    try testing.expect(with_star.match(alphabet ++ qwerty));
+    try testing.expect(with_star.match(""));
+
+
+    const with_plus = try Regex.compile(".+", testing.allocator);
+    defer with_plus.deinit();
+    try testing.expect(with_plus.match(alphabet));
+    try testing.expect(with_plus.match(alphabet ** 2));
+    try testing.expect(with_plus.match(qwerty));
+    try testing.expect(with_plus.match(qwerty ** 4));
+    try testing.expect(with_plus.match(alphabet ++ qwerty));
+    try testing.expect(!with_plus.match(""));
 }
 
 //MIT License
