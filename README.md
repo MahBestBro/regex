@@ -41,15 +41,17 @@ pub fn main() !void
  * `+` - Same as `*` but 1 or more repetitions.
  * `?` - If `R` is a regular expression, then `R?` matches 1 or no appearances if `R`
 
- Currently, the following are unique characters with their own special properties:
- * `.` - represents any character. 
+ The following character classes are supported as of current
+ * `.` - represents any character.
+
+ If you wish to use any of the characters that usually denote an operator, character class, or any other special meaning in general. You can use `/` before such a character as an 'escape' (e.g., `/*` would match "*").  
 
 ## Features to be added
- * Support for all ascii characters (this also implies the addition of `\` as an escape character).
  * `[]` (everything in the square brackets are or'd not concatenated).
     - Also support ranges with `-` (e.g., `[a-z]` would mean anything from `a` to `z`).
 
 ## Potential future features
+ * Substring matching
  * Subexpressions (probably with `{}`).
  * Unicode support
  * Any other operators I can think of or remember that are commonly used or are useful.

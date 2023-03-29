@@ -5,10 +5,17 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 
-//const MAX_CHARS = std.math.maxInt(u8) / 2;
-const MAX_CHARS = 26;
+fn memContains(comptime T: type, mem: []const T, target: T) bool
+{
+    for (mem) |val| if (val == target) return true;
+    return false;
+}
 
-const RegexSymbol = union(enum)
+
+const MAX_CHARS = std.math.maxInt(u8) / 2;
+//const MAX_CHARS = 26;
+
+const Symbol = union(enum)
 {
     char: u8,
     wildcard: void,
@@ -17,7 +24,7 @@ const RegexSymbol = union(enum)
     //takes in a char and returns whether the symbol matches it or not 
 };
 
-const PostfixOp = enum
+const Operator = enum
 {
     BRACKET, //Perhaps get rid of? Only needed in regexToPostfix
     CONCAT,
@@ -29,8 +36,8 @@ const PostfixOp = enum
 
 const PostfixElement = union(enum)
 {
-    symbol: RegexSymbol,
-    op: PostfixOp
+    symbol: Symbol,
+    op: Operator
 };
 
 //Converts a regex string to postfix notation.
@@ -46,29 +53,47 @@ fn regexToPostfix(
 
     var result_at: usize = 0;
     var result = try postfix_allocator.alloc(PostfixElement, 2 * regex_str.len - 1);
-    var stack = std.ArrayList(PostfixOp).init(allocator);
+    var stack = std.ArrayList(Operator).init(allocator);
     var last_added_is_expr = false;
-    for (regex_str) |char, i|
+    var i: usize = 0;
+    while (i < regex_str.len) : (i += 1)
     {
+        const char = regex_str[i];
+
+        const unconcatable = ")|*?+";
         const will_concat = i < regex_str.len - 1 and 
-                                (std.ascii.isLower(regex_str[i + 1]) or 
-                                 regex_str[i + 1] == '('); 
+                            !memContains(u8, unconcatable, regex_str[i + 1]); 
         
         switch (char)
         {
-            'a'...'z' => 
+            '.' =>
             {
-                result[result_at] = PostfixElement{ .symbol = RegexSymbol{ .char = char } };
+                result[result_at] = PostfixElement{ .symbol = Symbol{ .wildcard = {} } };
                 result_at += 1;
                 last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
             },
-            '.' =>
+            '/' => 
             {
-                result[result_at] = PostfixElement{ .symbol = RegexSymbol{ .wildcard = {} } };
+                if (i == regex_str.len - 1) return error.UnrecognisedEscape;
+
+                const special_chars = "()|*?+./";
+                const next_char = regex_str[i + 1];
+                if (!memContains(u8, special_chars, next_char))
+                    return error.UnrecognisedEscape;
+                
+                result[result_at] = .{ .symbol = Symbol{ .char = next_char } };
+                i += 1;
                 result_at += 1;
                 last_added_is_expr = true;
-                if (will_concat) try stack.append(.CONCAT);
+                
+                //NOTE: Do not use will_concat here as this relies on the *next* next 
+                //character
+                if (i < regex_str.len - 1 and 
+                    !memContains(u8, unconcatable, regex_str[i + 1])) 
+                {
+                    try stack.append(.CONCAT);
+                }
             },
             '(' => try stack.append(.BRACKET),
             ')' => 
@@ -149,7 +174,14 @@ fn regexToPostfix(
                 last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
-            else => return error.UnknownRegexSymbol
+            //Maybe add catch case for weird characters such as the ones before ' '???
+            else => 
+            {
+                result[result_at] = PostfixElement{ .symbol = Symbol{ .char = char } };
+                result_at += 1;
+                last_added_is_expr = true;
+                if (will_concat) try stack.append(.CONCAT);
+            },
         }
     }
 
@@ -168,7 +200,7 @@ const NfaState = struct
 {
     const NfaTransition = struct
     {
-        symbol: ?RegexSymbol, //If null, then it is an empty transition
+        symbol: ?Symbol, //If null, then it is an empty transition
         next: *NfaState,
     };
 
@@ -184,7 +216,7 @@ const NfaState = struct
         final: void
     },
 
-    pub fn single(id: usize, symbol: RegexSymbol, next: *NfaState) NfaState
+    pub fn single(id: usize, symbol: Symbol, next: *NfaState) NfaState
     {
         return NfaState
         {
@@ -445,8 +477,8 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
     var row_to_fill: usize = 0;
     while (row_to_fill < state_table.items.len) : (row_to_fill += 1)
     {
-        var char: u8 = 'a';
-        while (char < 'a' + MAX_CHARS) : (char += 1)
+        var char: u8 = 0;
+        while (char < MAX_CHARS) : (char += 1)
         {
             var next_state_set = try std.DynamicBitSet.initEmpty(
                 arena_allocator, 
@@ -493,12 +525,12 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
             //Write next state set into table
             if (next_state_set_row) |row| 
             {
-                state_table.items[row_to_fill][char - 'a'] = row;
+                state_table.items[row_to_fill][char] = row;
             }
             else
             {
                 //Set is new so add a new row to table
-                state_table.items[row_to_fill][char - 'a'] = state_sets.items.len;
+                state_table.items[row_to_fill][char] = state_sets.items.len;
                 try state_sets.append(next_state_set);
                 try state_table.append([_]?usize{null} ** MAX_CHARS);
             } 
@@ -552,7 +584,7 @@ pub const Regex = struct
         var current_state: usize = 0;
         for (str) |input_char| 
         {
-            const transition = self.dfa.table[current_state][input_char - 'a'];
+            const transition = self.dfa.table[current_state][input_char];
             if (transition) |next_state| current_state = next_state else return false;
         }
         return self.dfa.final_state_map[current_state];
@@ -574,12 +606,12 @@ const testing = std.testing;
 
 fn pfChar(char: u8) PostfixElement
 {
-    return PostfixElement{ .symbol = RegexSymbol{ .char = char } };
+    return PostfixElement{ .symbol = Symbol{ .char = char } };
 }
 
-//fn wildcard() RegexSymbol
+//fn wildcard() Symbol
 //{
-//    return RegexSymbol{ .wildcard = {} };
+//    return Symbol{ .wildcard = {} };
 //}
 
 test "regexToPostfix"
@@ -967,13 +999,13 @@ test "plus"
 
 test "wildcard"
 {
-    const alphabet = "abcdefghijklmnopqrstuvwxyz";
-    const qwerty = "qwertyuiopasdfghjklzxcvbnm";
-
     const sanity_check = try Regex.compile(".", testing.allocator);
     defer sanity_check.deinit();
-    for (alphabet) |_, i| try testing.expect(sanity_check.match(alphabet[i..i+1]));
-    for (qwerty)   |_, i| try testing.expect(sanity_check.match(qwerty[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+            try testing.expect(sanity_check.match(&input));
+    }
     try testing.expect(!sanity_check.match(""));
     try testing.expect(!sanity_check.match("aa"));
     try testing.expect(!sanity_check.match("bb"));
@@ -981,12 +1013,13 @@ test "wildcard"
 
     const with_concat = try Regex.compile(".b", testing.allocator);
     defer with_concat.deinit();
-    var input = [_]u8 {0, 'b'};
-    for (alphabet) |c, i| 
     {
-        input[0] = c;
-        try testing.expect(with_concat.match(&input));
-        try testing.expect(!with_concat.match(alphabet[i..i+1]));
+        var input = [_]u8 {0, 'b'};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            try testing.expect(with_concat.match(&input));
+            try testing.expect(!with_concat.match(input[0..1]));
+        }
     }
     try testing.expect(!with_concat.match(""));
     try testing.expect(!with_concat.match("aa"));
@@ -994,17 +1027,23 @@ test "wildcard"
 
     const with_optional = try Regex.compile(".?", testing.allocator);
     defer with_optional.deinit();
-    for (alphabet) |_, i| try testing.expect(with_optional.match(alphabet[i..i+1]));
-    for (qwerty)   |_, i| try testing.expect(with_optional.match(qwerty[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+            try testing.expect(with_optional.match(&input));
+    }
     try testing.expect(with_optional.match(""));
     try testing.expect(!with_optional.match("aa"));
     try testing.expect(!with_optional.match("bb"));
-    try testing.expect(!with_optional.match("az"));
+    try testing.expect(!with_optional.match("ab"));
 
     const with_or = try Regex.compile(".|ab", testing.allocator);
     defer with_or.deinit();
-    for (alphabet) |_, i| try testing.expect(with_optional.match(alphabet[i..i+1]));
-    for (qwerty)   |_, i| try testing.expect(with_optional.match(qwerty[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+            try testing.expect(with_or.match(&input));
+    }
     try testing.expect(with_or.match("ab"));
     try testing.expect(!with_or.match(""));
     try testing.expect(!with_or.match("aa"));
@@ -1013,22 +1052,48 @@ test "wildcard"
 
     const with_star = try Regex.compile(".*", testing.allocator);
     defer with_star.deinit();
-    try testing.expect(with_star.match(alphabet));
-    try testing.expect(with_star.match(alphabet ** 2));
-    try testing.expect(with_star.match(qwerty));
-    try testing.expect(with_star.match(qwerty ** 4));
-    try testing.expect(with_star.match(alphabet ++ qwerty));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+            try testing.expect(with_star.match(&input));
+    }
+    {
+        var input: [MAX_CHARS]u8 = undefined;
+        for (input) |*c, i| c.* = @intCast(u8, i);
+        try testing.expect(with_star.match(&input));
+        for (input) |*c, i| c.* = @intCast(u8, MAX_CHARS - i - 1);
+        try testing.expect(with_star.match(&input));
+    }
     try testing.expect(with_star.match(""));
-
+    try testing.expect(with_star.match("urmom"));
 
     const with_plus = try Regex.compile(".+", testing.allocator);
     defer with_plus.deinit();
-    try testing.expect(with_plus.match(alphabet));
-    try testing.expect(with_plus.match(alphabet ** 2));
-    try testing.expect(with_plus.match(qwerty));
-    try testing.expect(with_plus.match(qwerty ** 4));
-    try testing.expect(with_plus.match(alphabet ++ qwerty));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+            try testing.expect(with_plus.match(&input));
+    }
+    {
+        var input: [MAX_CHARS]u8 = undefined;
+        for (input) |*c, i| c.* = @intCast(u8, i);
+        try testing.expect(with_plus.match(&input));
+        for (input) |*c, i| c.* = @intCast(u8, MAX_CHARS - i - 1);
+        try testing.expect(with_plus.match(&input));
+    }
     try testing.expect(!with_plus.match(""));
+}
+
+test "escape"
+{
+    const special_chars = "()|*?+./";
+    const all_together = try Regex.compile("/(/)/|/*/?/+/.//", testing.allocator);
+    defer all_together.deinit();
+    try testing.expect(all_together.match(special_chars));
+
+    const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//", testing.allocator);
+    defer individually.deinit();
+    for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
 }
 
 //MIT License
