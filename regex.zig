@@ -12,13 +12,23 @@ fn memContains(comptime T: type, mem: []const T, target: T) bool
 }
 
 
-const MAX_CHARS = std.math.maxInt(u8) / 2;
-//const MAX_CHARS = 26;
+const MAX_CHARS = std.math.maxInt(u8) / 2 + 1;
 
 const Symbol = union(enum)
 {
     char: u8,
+    range: Range,
     wildcard: void,
+
+    pub fn match(self: Symbol, char: u8) bool
+    {
+        return switch (self)
+        {
+            .char => |c| c == char,
+            .wildcard => true,
+            .range => |range| range.char_flags[char] 
+        };
+    }
 
     //TODO: Once we start adding in ranges, have a "check" helper function that just 
     //takes in a char and returns whether the symbol matches it or not 
@@ -33,6 +43,53 @@ const Operator = enum
     OPTIONAL,
     PLUS
 };
+
+//TODO: Do some benchmarks on large inputs to see if large memory really affects speed
+const Range = struct
+{
+    char_flags: [MAX_CHARS]bool,
+
+    pub fn init(str: []const u8) !Range
+    {
+        var result = Range
+        { 
+            .char_flags = [_]bool{false} ** MAX_CHARS 
+        };
+        
+        var i: usize = 0; 
+        while (i < str.len) : (i += 1)
+        { 
+            const char = str[i];
+            switch(char)
+            {
+                '-' => 
+                {
+                    if (i == 0 or i == str.len - 1) return error.MissingRangeBoundary;
+
+                    const min = str[i - 1];
+                    const max = str[i + 1];
+                    if (min < max) return error.ReversedRange;
+
+                    //NOTE: The else clause should include the start and end of the range
+                    std.mem.set(bool, result.char_flags[min + 1..max], true);
+                },
+                '/' =>
+                {
+                    assert(i < str.len - 1);
+
+                    i += 1;
+                    if (str[i] != '-' or str[i] != '/') return error.UnrecognisedEscape;
+
+                    result.char_flags[str[i]] = true;
+                },
+                else => result.char_flags[char] = true,
+            }
+        }
+
+        return result;
+    }
+};
+
 
 const PostfixElement = union(enum)
 {
@@ -110,10 +167,35 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = op };
                     result_at += 1;
                 }
-                if (!found_closing_bracket) return error.MissmatchedClosingBracket;
+                if (!found_closing_bracket) return error.MismatchedClosingParantheis;
 
                 last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
+            },
+            '[' =>
+            {
+                if (i == regex_str.len - 1) return error.MismatchedClosingSquareBracket;
+
+                i += 1;
+                const start = i;
+                while (regex_str[i] != ']') : (i += 1)
+                {
+                    if (i == regex_str.len - 1) return error.MismatchedClosingSquareBracket;
+                    //NOTE: This skips over any escaped ']' characters
+                    i += @boolToInt(regex_str[i] == '/'); 
+                }
+                const end = i;
+
+                result[result_at] = PostfixElement
+                { 
+                    .symbol = Symbol{ .range = try Range.init(regex_str[start..end]) } 
+                };
+                result_at += 1;
+
+                last_added_is_expr = true;
+                const range_will_concat = i < regex_str.len - 1 and 
+                                          !memContains(u8, unconcatable, regex_str[i + 1]);
+                if (range_will_concat) try stack.append(.CONCAT);
             },
             '|' =>
             {
@@ -144,21 +226,6 @@ fn regexToPostfix(
                 last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
-            '?' =>
-            {
-                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
-
-                result[result_at] = PostfixElement{ .op = .OPTIONAL };
-                result_at += 1;
-                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
-                {
-                    result[result_at] = PostfixElement{ .op = stack.pop() };
-                    result_at += 1;
-                }
-
-                last_added_is_expr = false;
-                if (will_concat) try stack.append(.CONCAT);
-            },
             '+' =>
             {
                 if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
@@ -174,9 +241,26 @@ fn regexToPostfix(
                 last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
+            '?' =>
+            {
+                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
+
+                result[result_at] = PostfixElement{ .op = .OPTIONAL };
+                result_at += 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
+                {
+                    result[result_at] = PostfixElement{ .op = stack.pop() };
+                    result_at += 1;
+                }
+
+                last_added_is_expr = false;
+                if (will_concat) try stack.append(.CONCAT);
+            },
             //Maybe add catch case for weird characters such as the ones before ' '???
             else => 
             {
+                assert(char != ']');
+
                 result[result_at] = PostfixElement{ .symbol = Symbol{ .char = char } };
                 result_at += 1;
                 last_added_is_expr = true;
@@ -493,11 +577,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
                 const current_transitions = nfa.state_pool[state_id].transitions;
                 switch(current_transitions)
                 {
-                    .single => |t| 
-                    {
-                        if (t.symbol.? == .wildcard or t.symbol.?.char == char) 
-                            next_state_set.set(t.next.id);
-                    },
+                    .single => |t| if (t.symbol.?.match(char)) next_state_set.set(t.next.id),
                     .double => |t| assert(t[0].symbol == null and t[1].symbol == null),
                     .final => continue
                 }
@@ -618,6 +698,11 @@ test "regexToPostfix"
 {
     //Maybe make a helper function that makes manual PostfixElement arrays easier
     //to type out
+
+    std.debug.print(
+        "PostfixElement size: {d}\nNfaState size: {d}\n", 
+        .{@sizeOf(PostfixElement), @sizeOf(NfaState)}
+    );
 
     const test1 = try regexToPostfix("a(bb)|a", testing.allocator);
     defer testing.allocator.free(test1);
