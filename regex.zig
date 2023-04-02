@@ -66,7 +66,7 @@ const Range = struct
 
                     const min = str[i - 1];
                     const max = str[i + 1];
-                    if (min < max) return error.ReversedRange;
+                    if (min > max) return error.ReversedRange;
 
                     //NOTE: The else clause should include the start and end of the range
                     std.mem.set(bool, result.char_flags[min + 1..max], true);
@@ -1175,6 +1175,133 @@ test "escape"
     const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//", testing.allocator);
     defer individually.deinit();
     for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
+}
+
+test "range"
+{
+    const alphabet_lower = "abcdefghijklmnopqrstuvwxyz";
+    const alphabet_upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const qwerty_lower   = "qwertyuiopasdfghjklzxcvbnm";
+    const qwerty_upper   = "QWERTYUIOPASDFGHJKLZXCVBNM";
+    const digits = "0123456789";
+    
+    const sanity_check = try Regex.compile("[abc]", testing.allocator);
+    defer sanity_check.deinit();
+    try testing.expect(sanity_check.match("a"));
+    try testing.expect(sanity_check.match("b"));
+    try testing.expect(sanity_check.match("c"));
+    try testing.expect(!sanity_check.match(""));
+    try testing.expect(!sanity_check.match("ab"));
+    try testing.expect(!sanity_check.match("bc"));
+    try testing.expect(!sanity_check.match("ac"));
+    try testing.expect(!sanity_check.match("ba"));
+    try testing.expect(!sanity_check.match("ca"));
+    try testing.expect(!sanity_check.match("cb"));
+
+    const lowercase = try Regex.compile("[a-z]", testing.allocator);
+    defer lowercase.deinit();
+    try testing.expect(!lowercase.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(lowercase.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(lowercase.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(!lowercase.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(!lowercase.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(!lowercase.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isLower(input[0])) {
+                try testing.expect(lowercase.match(slice));
+            } else {
+                try testing.expect(!lowercase.match(slice));
+            }
+        }
+    }
+
+    const uppercase = try Regex.compile("[A-Z]", testing.allocator);
+    defer uppercase.deinit();
+    try testing.expect(!uppercase.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(!uppercase.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(!uppercase.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(uppercase.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(uppercase.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(!uppercase.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isUpper(input[0])) {
+                try testing.expect(uppercase.match(slice));
+            } else {
+                try testing.expect(!uppercase.match(slice));
+            }
+        }
+    }
+
+    const numeric = try Regex.compile("[0-9]", testing.allocator);
+    defer numeric.deinit();
+    try testing.expect(!numeric.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(!numeric.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(!numeric.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(!numeric.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(!numeric.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(numeric.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isDigit(input[0])) {
+                try testing.expect(numeric.match(slice));
+            } else {
+                try testing.expect(!numeric.match(slice));
+            }
+        }
+    }
+
+    const letter = try Regex.compile("[a-zA-Z]", testing.allocator);
+    defer letter.deinit();
+    try testing.expect(!letter.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(letter.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(letter.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(letter.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(letter.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(!letter.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isAlphabetic(input[0])) {
+                try testing.expect(letter.match(slice));
+            } else {
+                try testing.expect(!letter.match(slice));
+            }
+        }
+    }
+
+    const alphanumeric = try Regex.compile("[a-zA-Z0-9]", testing.allocator);
+    defer alphanumeric.deinit();
+    try testing.expect(!letter.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(alphanumeric.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(alphanumeric.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(alphanumeric.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(alphanumeric.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(alphanumeric.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isAlphanumeric(input[0])) {
+                try testing.expect(alphanumeric.match(slice));
+            } else {
+                try testing.expect(!alphanumeric.match(slice));
+            }
+        }
+    }
 }
 
 //MIT License
