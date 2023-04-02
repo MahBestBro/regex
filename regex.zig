@@ -12,13 +12,23 @@ fn memContains(comptime T: type, mem: []const T, target: T) bool
 }
 
 
-const MAX_CHARS = std.math.maxInt(u8) / 2;
-//const MAX_CHARS = 26;
+const MAX_CHARS = std.math.maxInt(u8) / 2 + 1;
 
 const Symbol = union(enum)
 {
     char: u8,
+    range: Range,
     wildcard: void,
+
+    pub fn match(self: Symbol, char: u8) bool
+    {
+        return switch (self)
+        {
+            .char => |c| c == char,
+            .wildcard => true,
+            .range => |range| range.char_flags[char] 
+        };
+    }
 
     //TODO: Once we start adding in ranges, have a "check" helper function that just 
     //takes in a char and returns whether the symbol matches it or not 
@@ -33,6 +43,51 @@ const Operator = enum
     OPTIONAL,
     PLUS
 };
+
+//TODO: Do some benchmarks on large inputs to see if large memory really affects speed
+const Range = struct
+{
+    char_flags: [MAX_CHARS]bool,
+
+    pub fn init(str: []const u8) !Range
+    {
+        var result: Range = undefined;
+        std.mem.set(bool, &result.char_flags, false);
+        
+        var i: usize = 0; 
+        while (i < str.len) : (i += 1)
+        { 
+            const char = str[i];
+            switch(char)
+            {
+                '-' => 
+                {
+                    if (i == 0 or i == str.len - 1) return error.MissingRangeBoundary;
+
+                    const min = str[i - 1];
+                    const max = str[i + 1];
+                    if (min > max) return error.ReversedRange;
+
+                    //NOTE: The else clause should include the start and end of the range
+                    std.mem.set(bool, result.char_flags[min + 1..max], true);
+                },
+                '/' =>
+                {
+                    assert(i < str.len - 1);
+
+                    i += 1;
+                    if (str[i] != '-' or str[i] != '/') return error.UnrecognisedEscape;
+
+                    result.char_flags[str[i]] = true;
+                },
+                else => result.char_flags[char] = true,
+            }
+        }
+
+        return result;
+    }
+};
+
 
 const PostfixElement = union(enum)
 {
@@ -52,7 +107,7 @@ fn regexToPostfix(
     var allocator = arena.allocator();
 
     var result_at: usize = 0;
-    var result = try postfix_allocator.alloc(PostfixElement, 2 * regex_str.len - 1);
+    var result = try allocator.alloc(PostfixElement, 2 * regex_str.len - 1);
     var stack = std.ArrayList(Operator).init(allocator);
     var last_added_is_expr = false;
     var i: usize = 0;
@@ -110,10 +165,35 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = op };
                     result_at += 1;
                 }
-                if (!found_closing_bracket) return error.MissmatchedClosingBracket;
+                if (!found_closing_bracket) return error.MismatchedClosingParantheis;
 
                 last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
+            },
+            '[' =>
+            {
+                if (i == regex_str.len - 1) return error.MismatchedClosingSquareBracket;
+
+                i += 1;
+                const start = i;
+                while (regex_str[i] != ']') : (i += 1)
+                {
+                    if (i == regex_str.len - 1) return error.MismatchedClosingSquareBracket;
+                    //NOTE: This skips over any escaped ']' characters
+                    i += @boolToInt(regex_str[i] == '/'); 
+                }
+                const end = i;
+
+                result[result_at] = PostfixElement
+                { 
+                    .symbol = Symbol{ .range = try Range.init(regex_str[start..end]) } 
+                };
+                result_at += 1;
+
+                last_added_is_expr = true;
+                const range_will_concat = i < regex_str.len - 1 and 
+                                          !memContains(u8, unconcatable, regex_str[i + 1]);
+                if (range_will_concat) try stack.append(.CONCAT);
             },
             '|' =>
             {
@@ -144,21 +224,6 @@ fn regexToPostfix(
                 last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
-            '?' =>
-            {
-                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
-
-                result[result_at] = PostfixElement{ .op = .OPTIONAL };
-                result_at += 1;
-                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
-                {
-                    result[result_at] = PostfixElement{ .op = stack.pop() };
-                    result_at += 1;
-                }
-
-                last_added_is_expr = false;
-                if (will_concat) try stack.append(.CONCAT);
-            },
             '+' =>
             {
                 if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
@@ -174,9 +239,26 @@ fn regexToPostfix(
                 last_added_is_expr = false;
                 if (will_concat) try stack.append(.CONCAT);
             },
+            '?' =>
+            {
+                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
+
+                result[result_at] = PostfixElement{ .op = .OPTIONAL };
+                result_at += 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == .CONCAT)
+                {
+                    result[result_at] = PostfixElement{ .op = stack.pop() };
+                    result_at += 1;
+                }
+
+                last_added_is_expr = false;
+                if (will_concat) try stack.append(.CONCAT);
+            },
             //Maybe add catch case for weird characters such as the ones before ' '???
             else => 
             {
+                assert(char != ']');
+
                 result[result_at] = PostfixElement{ .symbol = Symbol{ .char = char } };
                 result_at += 1;
                 last_added_is_expr = true;
@@ -193,7 +275,7 @@ fn regexToPostfix(
     }
     assert(result_at == 1 or result[result_at - 1] != .symbol);
 
-    return result[0..result_at];
+    return try postfix_allocator.dupe(PostfixElement, result[0..result_at]);
 }
 
 const NfaState = struct
@@ -201,7 +283,7 @@ const NfaState = struct
     const NfaTransition = struct
     {
         symbol: ?Symbol, //If null, then it is an empty transition
-        next: *NfaState,
+        next_id: usize,
     };
 
     id: usize,
@@ -216,19 +298,19 @@ const NfaState = struct
         final: void
     },
 
-    pub fn single(id: usize, symbol: Symbol, next: *NfaState) NfaState
+    pub fn single(id: usize, symbol: Symbol, next_id: usize) NfaState
     {
         return NfaState
         {
             .id = id,
             .transitions = 
             .{
-                .single = .{ .symbol = symbol, .next = next },
+                .single = .{ .symbol = symbol, .next_id = next_id },
             }
         };
     }
 
-    pub fn double(id: usize, next1: *NfaState, next2: *NfaState) NfaState
+    pub fn double(id: usize, next1_id: usize, next2_id: usize) NfaState
     {
         return NfaState
         {
@@ -237,8 +319,8 @@ const NfaState = struct
             .{
                 .double = 
                 .{
-                    .{ .symbol = null, .next = next1 },
-                    .{ .symbol = null, .next = next2 },
+                    .{ .symbol = null, .next_id = next1_id },
+                    .{ .symbol = null, .next_id = next2_id },
                 }
             }
         };
@@ -266,11 +348,11 @@ const NFA = struct
 //only one fragment on the stack which is the entire NFA.
 fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
 {    
-    const PtrList = std.ArrayList(**NfaState);
+    const PtrList = std.ArrayList(*usize);
 
     const Frag = struct
     {
-        start: *NfaState,
+        start_id: usize,
         dangling_ptrs: PtrList
     };
 
@@ -278,11 +360,12 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
     defer arena.deinit();
     var arena_allocator = arena.allocator();
 
-    const state_pool = try allocator.alloc(NfaState, str.len + 1);
+    const postfix = try regexToPostfix(str, arena_allocator);
+
+    const state_pool = try arena_allocator.alloc(NfaState, str.len + 1);
     var new_state_index: usize = 0; 
 
     //TODO: Properly handle regex parse errors (potentially take outside function?)
-    const postfix = try regexToPostfix(str, arena_allocator);
     var stack = std.ArrayList(Frag).init(arena_allocator);
     for (postfix) |el|
     {
@@ -294,10 +377,10 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
             
             var frag = Frag
             { 
-                .start = new_state, 
+                .start_id = new_state.id, 
                 .dangling_ptrs = PtrList.init(arena_allocator) 
             };
-            try frag.dangling_ptrs.append(&new_state.transitions.single.next);
+            try frag.dangling_ptrs.append(&new_state.transitions.single.next_id);
             try stack.append(frag);
 
             continue;
@@ -311,7 +394,7 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
 
                 const rhs = stack.pop();
                 var lhs = &stack.items[stack.items.len - 1]; 
-                for (lhs.dangling_ptrs.items) |ptr| ptr.* = rhs.start;
+                for (lhs.dangling_ptrs.items) |ptr| ptr.* = rhs.start_id;
                 lhs.dangling_ptrs.clearRetainingCapacity();
                 try lhs.dangling_ptrs.appendSlice(rhs.dangling_ptrs.items);
             },
@@ -321,12 +404,12 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 const rhs = stack.pop();
 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState.double(new_state_index, lhs.start, rhs.start);
+                new_state.* = NfaState.double(new_state_index, lhs.start_id, rhs.start_id);
                 new_state_index += 1;
 
                 var frag = Frag
                 { 
-                    .start = new_state, 
+                    .start_id = new_state.id, 
                     .dangling_ptrs = PtrList.init(arena_allocator) 
                 };
                 try frag.dangling_ptrs.appendSlice(lhs.dangling_ptrs.items);
@@ -338,17 +421,17 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 var popped = stack.pop();
                 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState.double(new_state_index, popped.start, undefined);
+                new_state.* = NfaState.double(new_state_index, popped.start_id, undefined);
                 new_state_index += 1;
                 
-                for (popped.dangling_ptrs.items) |ptr| ptr.* = new_state;
+                for (popped.dangling_ptrs.items) |ptr| ptr.* = new_state.id;
 
                 var frag = Frag
                 { 
-                    .start = new_state, 
+                    .start_id = new_state.id, 
                     .dangling_ptrs = PtrList.init(arena_allocator) 
                 };
-                try frag.dangling_ptrs.append(&new_state.transitions.double[1].next);
+                try frag.dangling_ptrs.append(&new_state.transitions.double[1].next_id);
                 try stack.append(frag);
             },
             .OPTIONAL =>
@@ -356,16 +439,16 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 var popped = stack.pop();
                 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState.double(new_state_index, popped.start, undefined);
+                new_state.* = NfaState.double(new_state_index, popped.start_id, undefined);
                 new_state_index += 1;
 
                 var frag = Frag
                 { 
-                    .start = new_state, 
+                    .start_id = new_state.id, 
                     .dangling_ptrs = PtrList.init(arena_allocator) 
                 };
                 try frag.dangling_ptrs.appendSlice(popped.dangling_ptrs.items);
-                try frag.dangling_ptrs.append(&new_state.transitions.double[1].next);
+                try frag.dangling_ptrs.append(&new_state.transitions.double[1].next_id);
                 try stack.append(frag);
 
             },
@@ -374,13 +457,13 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
                 var top = &stack.items[stack.items.len - 1];
 
                 var new_state = &state_pool[new_state_index];
-                new_state.* = NfaState.double(new_state_index, top.start, undefined);
+                new_state.* = NfaState.double(new_state_index, top.start_id, undefined);
                 new_state_index += 1;
 
-                for (top.dangling_ptrs.items) |ptr| ptr.* = new_state;
+                for (top.dangling_ptrs.items) |ptr| ptr.* = new_state.id;
                 top.dangling_ptrs.clearRetainingCapacity();
                 
-                try top.dangling_ptrs.append(&new_state.transitions.double[1].next);
+                try top.dangling_ptrs.append(&new_state.transitions.double[1].next_id);
             },
             else => unreachable,
         }
@@ -392,9 +475,15 @@ fn createNFA(str: []const u8, allocator: std.mem.Allocator) !NFA
     const match_state = &state_pool[new_state_index];
     match_state.* = NfaState.final(new_state_index);
     new_state_index += 1;
-    for (result.dangling_ptrs.items) |ptr| ptr.* = match_state;
+    for (result.dangling_ptrs.items) |ptr| ptr.* = match_state.id;
 
-    return NFA{ .start = result.start.*, .state_pool = state_pool[0..new_state_index] };
+    //std.debug.print("num states for {s}: {d}\n", .{str, new_state_index});
+
+    return NFA
+    { 
+        .start = state_pool[result.start_id], 
+        .state_pool = try allocator.dupe(NfaState, state_pool[0..new_state_index]) 
+    };
 }
 
 
@@ -411,7 +500,8 @@ const DFA = struct
 //'arena_allocator' should be an allocator from std.heap.ArenaAllocator. 
 fn fillEmptyTransitions(
     state_set: *std.DynamicBitSet, 
-    start: NfaState, 
+    start: NfaState,
+    nfa: NFA, 
     arena_allocator: std.mem.Allocator
 ) !void
 {
@@ -432,8 +522,8 @@ fn fillEmptyTransitions(
                 {
                     assert(t[0].symbol == null and t[1].symbol == null);
 
-                    try states_to_traverse.append(t[0].next.*);
-                    try states_to_traverse.append(t[1].next.*);
+                    try states_to_traverse.append(nfa.state_pool[t[0].next_id]);
+                    try states_to_traverse.append(nfa.state_pool[t[1].next_id]);
                 },
                 .final => {}
             }
@@ -471,7 +561,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
         arena_allocator, 
         nfa.state_pool.len
     ));
-    try fillEmptyTransitions(&state_sets.items[0], nfa.start, arena_allocator);
+    try fillEmptyTransitions(&state_sets.items[0], nfa.start, nfa, arena_allocator);
     try state_table.append([_]?usize{null} ** MAX_CHARS);
 
     var row_to_fill: usize = 0;
@@ -493,11 +583,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
                 const current_transitions = nfa.state_pool[state_id].transitions;
                 switch(current_transitions)
                 {
-                    .single => |t| 
-                    {
-                        if (t.symbol.? == .wildcard or t.symbol.?.char == char) 
-                            next_state_set.set(t.next.id);
-                    },
+                    .single => |t| if (t.symbol.?.match(char)) next_state_set.set(t.next_id),
                     .double => |t| assert(t[0].symbol == null and t[1].symbol == null),
                     .final => continue
                 }
@@ -508,7 +594,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
             while (it.next()) |state_id|
             {
                 const state = nfa.state_pool[state_id];
-                try fillEmptyTransitions(&next_state_set, state, arena_allocator);
+                try fillEmptyTransitions(&next_state_set, state, nfa, arena_allocator);
             }
             
             //Get row index of next state set
@@ -609,11 +695,6 @@ fn pfChar(char: u8) PostfixElement
     return PostfixElement{ .symbol = Symbol{ .char = char } };
 }
 
-//fn wildcard() Symbol
-//{
-//    return Symbol{ .wildcard = {} };
-//}
-
 test "regexToPostfix"
 {
     //Maybe make a helper function that makes manual PostfixElement arrays easier
@@ -677,7 +758,7 @@ test "createNFA"
         const first = single.start;
         try testing.expect(first.transitions == .single);
         try testing.expect(first.transitions.single.symbol.?.char == 'a');
-        const last = first.transitions.single.next.*;
+        const last = single.state_pool[first.transitions.single.next_id];
         try testing.expect(last.transitions == .final);
     }
 
@@ -689,10 +770,10 @@ test "createNFA"
         const first = concat.start;
         try testing.expect(first.transitions == .single);
         try testing.expect(first.transitions.single.symbol.?.char == 'a');
-        const second = first.transitions.single.next.*;
+        const second = concat.state_pool[first.transitions.single.next_id];
         try testing.expect(second.transitions == .single);
         try testing.expect(second.transitions.single.symbol.?.char == 'b');
-        const last = second.transitions.single.next.*;
+        const last = concat.state_pool[second.transitions.single.next_id];
         try testing.expect(last.transitions == .final);
     }
 
@@ -705,15 +786,15 @@ test "createNFA"
         const first = disjunction.start;
         try testing.expect(first.transitions == .double);
         
-        const a_route = first.transitions.double[1].next.*;
+        const a_route = disjunction.state_pool[first.transitions.double[1].next_id];
         try testing.expect(a_route.transitions == .single);
         try testing.expect(a_route.transitions.single.symbol.?.char == 'a');
-        const b_route = first.transitions.double[0].next.*;
+        const b_route = disjunction.state_pool[first.transitions.double[0].next_id];
         try testing.expect(b_route.transitions == .single);
         try testing.expect(b_route.transitions.single.symbol.?.char == 'b');
-        try testing.expect(a_route.transitions.single.next == b_route.transitions.single.next);
+        try testing.expect(a_route.transitions.single.next_id == b_route.transitions.single.next_id);
 
-        const last = a_route.transitions.single.next.*;
+        const last = disjunction.state_pool[a_route.transitions.single.next_id];
         try testing.expect(last.transitions == .final);
     }
 
@@ -726,12 +807,12 @@ test "createNFA"
         const first = star.start;
         try testing.expect(first.transitions == .double);
         
-        const loop = first.transitions.double[0].next.*;
+        const loop = star.state_pool[first.transitions.double[0].next_id];
         try testing.expect(loop.transitions == .single);
         try testing.expect(loop.transitions.single.symbol.?.char == 'a');
-        try testing.expectEqual(loop.transitions.single.next.*, first);
+        try testing.expectEqual(loop.transitions.single.next_id, first.id);
 
-        const last = first.transitions.double[1].next.*;
+        const last = star.state_pool[first.transitions.double[1].next_id];
         try testing.expect(last.transitions == .final);
     }
 
@@ -743,12 +824,12 @@ test "createNFA"
         const first = optional.start;
         try testing.expect(first.transitions == .double);
         
-        const symbol_route = first.transitions.double[0].next.*;
+        const symbol_route = optional.state_pool[first.transitions.double[0].next_id];
         try testing.expect(symbol_route.transitions == .single);
         try testing.expect(symbol_route.transitions.single.symbol.?.char == 'a');
 
-        const last = first.transitions.double[1].next.*;
-        try testing.expectEqual(symbol_route.transitions.single.next.*, last);
+        const last = optional.state_pool[first.transitions.double[1].next_id];
+        try testing.expectEqual(symbol_route.transitions.single.next_id, last.id);
         try testing.expect(last.transitions == .final);
     }
 
@@ -761,11 +842,11 @@ test "createNFA"
         try testing.expect(first.transitions == .single);
         try testing.expect(first.transitions.single.symbol.?.char == 'a');
         
-        const loop = first.transitions.single.next.*;
+        const loop = plus.state_pool[first.transitions.single.next_id];
         try testing.expect(loop.transitions == .double);
-        try testing.expectEqual(loop.transitions.double[0].next.*, first);
+        try testing.expectEqual(loop.transitions.double[0].next_id, first.id);
 
-        const last = loop.transitions.double[1].next.*;
+        const last = plus.state_pool[loop.transitions.double[1].next_id];
         try testing.expect(last.transitions == .final);
     }
 
@@ -1094,6 +1175,133 @@ test "escape"
     const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//", testing.allocator);
     defer individually.deinit();
     for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
+}
+
+test "range"
+{
+    const alphabet_lower = "abcdefghijklmnopqrstuvwxyz";
+    const alphabet_upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const qwerty_lower   = "qwertyuiopasdfghjklzxcvbnm";
+    const qwerty_upper   = "QWERTYUIOPASDFGHJKLZXCVBNM";
+    const digits = "0123456789";
+    
+    const sanity_check = try Regex.compile("[abc]", testing.allocator);
+    defer sanity_check.deinit();
+    try testing.expect(sanity_check.match("a"));
+    try testing.expect(sanity_check.match("b"));
+    try testing.expect(sanity_check.match("c"));
+    try testing.expect(!sanity_check.match(""));
+    try testing.expect(!sanity_check.match("ab"));
+    try testing.expect(!sanity_check.match("bc"));
+    try testing.expect(!sanity_check.match("ac"));
+    try testing.expect(!sanity_check.match("ba"));
+    try testing.expect(!sanity_check.match("ca"));
+    try testing.expect(!sanity_check.match("cb"));
+
+    const lowercase = try Regex.compile("[a-z]", testing.allocator);
+    defer lowercase.deinit();
+    try testing.expect(!lowercase.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(lowercase.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(lowercase.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(!lowercase.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(!lowercase.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(!lowercase.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isLower(input[0])) {
+                try testing.expect(lowercase.match(slice));
+            } else {
+                try testing.expect(!lowercase.match(slice));
+            }
+        }
+    }
+
+    const uppercase = try Regex.compile("[A-Z]", testing.allocator);
+    defer uppercase.deinit();
+    try testing.expect(!uppercase.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(!uppercase.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(!uppercase.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(uppercase.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(uppercase.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(!uppercase.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isUpper(input[0])) {
+                try testing.expect(uppercase.match(slice));
+            } else {
+                try testing.expect(!uppercase.match(slice));
+            }
+        }
+    }
+
+    const numeric = try Regex.compile("[0-9]", testing.allocator);
+    defer numeric.deinit();
+    try testing.expect(!numeric.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(!numeric.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(!numeric.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(!numeric.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(!numeric.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(numeric.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isDigit(input[0])) {
+                try testing.expect(numeric.match(slice));
+            } else {
+                try testing.expect(!numeric.match(slice));
+            }
+        }
+    }
+
+    const letter = try Regex.compile("[a-zA-Z]", testing.allocator);
+    defer letter.deinit();
+    try testing.expect(!letter.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(letter.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(letter.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(letter.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(letter.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(!letter.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isAlphabetic(input[0])) {
+                try testing.expect(letter.match(slice));
+            } else {
+                try testing.expect(!letter.match(slice));
+            }
+        }
+    }
+
+    const alphanumeric = try Regex.compile("[a-zA-Z0-9]", testing.allocator);
+    defer alphanumeric.deinit();
+    try testing.expect(!letter.match(""));
+    for (alphabet_lower) |_, i| try testing.expect(alphanumeric.match(alphabet_lower[i..i+1]));
+    for (qwerty_lower)   |_, i| try testing.expect(alphanumeric.match(qwerty_lower[i..i+1]));
+    for (alphabet_upper) |_, i| try testing.expect(alphanumeric.match(alphabet_upper[i..i+1]));
+    for (qwerty_upper)   |_, i| try testing.expect(alphanumeric.match(qwerty_upper[i..i+1]));
+    for (digits) |_, i| try testing.expect(alphanumeric.match(digits[i..i+1]));
+    {
+        var input = [_]u8{0};
+        while (input[0] < MAX_CHARS) : (input[0] += 1)
+        {
+            const slice = input[0..];
+            if (std.ascii.isAlphanumeric(input[0])) {
+                try testing.expect(alphanumeric.match(slice));
+            } else {
+                try testing.expect(!alphanumeric.match(slice));
+            }
+        }
+    }
 }
 
 //MIT License
