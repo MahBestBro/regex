@@ -1,7 +1,7 @@
 # zig-regex
  A single file regex library written in and for Zig.
 
- **Note:** This library is still mostly unfinished, and as a result it cannot do a lot in its current state. For now I would reccomend using another library if you are looking for something robust.  
+ **Note:** This library is still in development.  For now I would recommend using another library if you are looking for something robust.  
  
  This library was mainly inspired by the rough implementation of Ken Thompson's algorithm outlined in [this article](https://swtch.com/~rsc/regexp/regexp1.html) by Russ Cox, though not everything is based off it.
 
@@ -43,15 +43,15 @@ pub fn main() !void
 
  The following character classes are supported as of current
  * `.` - represents any character.
+ * `[]` - represents any of the characters inside these brackets (e.g., `[abc]` would mean 'a', 'b' or 'c').
+  * `-` - use inside square brackets to denote a range of characters (e.g., `[a-z]` would mean any character from 'a' to 'z').
 
  If you wish to use any of the characters that usually denote an operator, character class, or any other special meaning in general. You can use `/` before such a character as an 'escape' (e.g., `/*` would match "*").  
 
 ## Features to be added
- * `[]` (everything in the square brackets are or'd not concatenated).
-    - Also support ranges with `-` (e.g., `[a-z]` would mean anything from `a` to `z`).
+ * Substring matching
 
 ## Potential future features
- * Substring matching
  * Subexpressions (probably with `{}`).
  * Unicode support
  * Any other operators I can think of or remember that are commonly used or are useful.

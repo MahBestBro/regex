@@ -29,9 +29,6 @@ const Symbol = union(enum)
             .range => |range| range.char_flags[char] 
         };
     }
-
-    //TODO: Once we start adding in ranges, have a "check" helper function that just 
-    //takes in a char and returns whether the symbol matches it or not 
 };
 
 const Operator = enum
@@ -1302,6 +1299,54 @@ test "range"
             }
         }
     }
+
+    const concat = try Regex.compile("a[a-z]", testing.allocator);
+    defer concat.deinit();
+    try testing.expect(!concat.match(""));
+    {
+        var input1 = [_]u8{'a', 'a'};
+        var input2 = [_]u8{'b', 'a'};
+        for (alphabet_lower) |c|
+        {
+            input1[1] = c;
+            input2[1] = c;
+            try testing.expect(concat.match(&input1));
+            try testing.expect(!concat.match(&input2));
+        }
+    }
+
+    const disjunct = try Regex.compile("A|[a-z]", testing.allocator);
+    defer disjunct.deinit();
+    try testing.expect(!disjunct.match(""));
+    try testing.expect(disjunct.match("A"));
+    for (alphabet_lower) |_, i| try testing.expect(disjunct.match(alphabet_lower[i..i+1]));
+
+    const optional = try Regex.compile("[a-z]?", testing.allocator);
+    defer optional.deinit();
+    try testing.expect(optional.match(""));
+    try testing.expect(!optional.match("A"));
+    for (alphabet_lower) |_, i| try testing.expect(optional.match(alphabet_lower[i..i+1]));
+
+    const star = try Regex.compile("[a-z]*", testing.allocator);
+    defer star.deinit();
+    try testing.expect(star.match(""));
+    try testing.expect(!star.match("A"));
+    for (alphabet_lower) |_, i| try testing.expect(star.match(alphabet_lower[i..i+1]));
+    try testing.expect(star.match(alphabet_lower));
+    try testing.expect(!star.match(alphabet_upper));
+    try testing.expect(star.match(qwerty_lower));
+    try testing.expect(!star.match(qwerty_upper));
+
+    const plus = try Regex.compile("[a-z]+", testing.allocator);
+    defer plus.deinit();
+    try testing.expect(!plus.match(""));
+    try testing.expect(!plus.match("A"));
+    for (alphabet_lower) |_, i| try testing.expect(star.match(alphabet_lower[i..i+1]));
+    try testing.expect(plus.match(alphabet_lower));
+    try testing.expect(!plus.match(alphabet_upper));
+    try testing.expect(plus.match(qwerty_lower));
+    try testing.expect(!plus.match(qwerty_upper));
+
 }
 
 //MIT License
