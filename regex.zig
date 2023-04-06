@@ -73,7 +73,7 @@ const Range = struct
                     assert(i < str.len - 1);
 
                     i += 1;
-                    if (str[i] != '-' or str[i] != '/') return error.UnrecognisedEscape;
+                    if (str[i] != '-' and str[i] != '/' and str[i] != ']') return error.UnrecognisedEscape;
 
                     result.char_flags[str[i]] = true;
                 },
@@ -129,7 +129,7 @@ fn regexToPostfix(
             {
                 if (i == regex_str.len - 1) return error.UnrecognisedEscape;
 
-                const special_chars = "()|*?+./";
+                const special_chars = "()|*?+./[]";
                 const next_char = regex_str[i + 1];
                 if (!memContains(u8, special_chars, next_char))
                     return error.UnrecognisedEscape;
@@ -1164,12 +1164,12 @@ test "wildcard"
 
 test "escape"
 {
-    const special_chars = "()|*?+./";
-    const all_together = try Regex.compile("/(/)/|/*/?/+/.//", testing.allocator);
+    const special_chars = "()|*?+./[]";
+    const all_together = try Regex.compile("/(/)/|/*/?/+/.///[/]", testing.allocator);
     defer all_together.deinit();
     try testing.expect(all_together.match(special_chars));
 
-    const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//", testing.allocator);
+    const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//|/[|/]", testing.allocator);
     defer individually.deinit();
     for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
 }
@@ -1347,6 +1347,18 @@ test "range"
     try testing.expect(plus.match(qwerty_lower));
     try testing.expect(!plus.match(qwerty_upper));
 
+    const escape = try Regex.compile("[/-///]]", testing.allocator);
+    defer escape.deinit();
+    try testing.expect(escape.match("-"));
+    try testing.expect(escape.match("/"));
+    try testing.expect(escape.match("]"));
+    try testing.expect(!escape.match(""));
+    try testing.expect(!escape.match("["));
+    try testing.expect(!escape.match("-/"));
+    try testing.expect(!escape.match("-]"));
+    try testing.expect(!escape.match("/]"));
+
+    try testing.expectError(error.UnrecognisedEscape, Regex.compile("[/p]", testing.allocator));
 }
 
 //MIT License
