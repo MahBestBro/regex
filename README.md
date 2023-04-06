@@ -53,5 +53,5 @@ pub fn main() !void
 
 ## Potential future features
  * Subexpressions (probably with `{}`).
- * Unicode support
+ * UTF8 support
  * Any other operators I can think of or remember that are commonly used or are useful.

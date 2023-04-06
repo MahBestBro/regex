@@ -73,7 +73,8 @@ const Range = struct
                     assert(i < str.len - 1);
 
                     i += 1;
-                    if (str[i] != '-' and str[i] != '/' and str[i] != ']') return error.UnrecognisedEscape;
+                    if (str[i] != '-' and str[i] != '/' and str[i] != ']') 
+                        return error.UnrecognisedEscape;
 
                     result.char_flags[str[i]] = true;
                 },
@@ -162,23 +163,24 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = op };
                     result_at += 1;
                 }
-                if (!found_closing_bracket) return error.MismatchedClosingParantheis;
+                if (!found_closing_bracket) return error.MismatchedClosingParenthesis;
 
                 last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
             },
             '[' =>
             {
-                if (i == regex_str.len - 1) return error.MismatchedClosingSquareBracket;
+                if (i == regex_str.len - 1) return error.MismatchedOpeningSquareBracket;
 
                 i += 1;
                 const start = i;
-                while (regex_str[i] != ']') : (i += 1)
+                while (i < regex_str.len and regex_str[i] != ']') : (i += 1)
                 {
-                    if (i == regex_str.len - 1) return error.MismatchedClosingSquareBracket;
                     //NOTE: This skips over any escaped ']' characters
                     i += @boolToInt(regex_str[i] == '/'); 
                 }
+                if (i == regex_str.len and (regex_str[i - 1] != ']' or regex_str[i - 2] == '/')) 
+                    return error.MismatchedOpeningSquareBracket;
                 const end = i;
 
                 result[result_at] = PostfixElement
@@ -192,6 +194,7 @@ fn regexToPostfix(
                                           !memContains(u8, unconcatable, regex_str[i + 1]);
                 if (range_will_concat) try stack.append(.CONCAT);
             },
+            ']' => return error.MismatchedClosingSquareBracket,
             '|' =>
             {
                 if (i == 0 or i == regex_str.len - 1) return error.BinOpWithOneArg;
@@ -267,6 +270,7 @@ fn regexToPostfix(
 
     while (stack.popOrNull()) |op|
     {
+        if (op == .BRACKET) return error.MismatchedOpeningParenthesis;
         result[result_at] = PostfixElement{ .op = op };
         result_at += 1;
     }
@@ -880,6 +884,9 @@ test "bracket"
     defer r.deinit();
     try testing.expect(r.match("a"));
     try testing.expect(!r.match("b"));
+
+    try testing.expectError(error.MismatchedOpeningParenthesis, Regex.compile("abc(", testing.allocator));
+    try testing.expectError(error.MismatchedClosingParenthesis, Regex.compile("abc)", testing.allocator));
 }
 
 test "or"
@@ -917,6 +924,10 @@ test "or"
     try testing.expect(!precedence_check.match(""));
     try testing.expect(!precedence_check.match("ac"));
     try testing.expect(!precedence_check.match("acc"));
+
+    try testing.expectError(error.BinOpWithOneArg, Regex.compile("|", testing.allocator));
+    try testing.expectError(error.BinOpWithOneArg, Regex.compile("a|", testing.allocator));
+    try testing.expectError(error.BinOpWithOneArg, Regex.compile("|a", testing.allocator));
 }
 
 test "kleene star"
@@ -964,6 +975,10 @@ test "kleene star"
     try testing.expect(!bracketed.match("b"));
     try testing.expect(!bracketed.match("aab"));
     try testing.expect(!bracketed.match("abb"));
+
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("*", testing.allocator));
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("*a", testing.allocator));
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("a?*", testing.allocator));
 }
 
 test "optional"
@@ -1017,6 +1032,10 @@ test "optional"
     try testing.expect(with_kleene_star.match("abab"));
     try testing.expect(!with_kleene_star.match("b"));
     try testing.expect(!with_kleene_star.match("abb"));
+
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("?", testing.allocator));
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("?a", testing.allocator));
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("a*?", testing.allocator));
 }
 
 test "plus"
@@ -1073,6 +1092,10 @@ test "plus"
     try testing.expect(!bracketed.match("b"));
     try testing.expect(!bracketed.match("aab"));
     try testing.expect(!bracketed.match("abb"));
+
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("+", testing.allocator));
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("+a", testing.allocator));
+    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("a?+", testing.allocator));
 }
 
 test "wildcard"
@@ -1172,6 +1195,9 @@ test "escape"
     const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//|/[|/]", testing.allocator);
     defer individually.deinit();
     for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
+
+    try testing.expectError(error.UnrecognisedEscape, Regex.compile("/p", testing.allocator));
+    try testing.expectError(error.UnrecognisedEscape, Regex.compile("/", testing.allocator));
 }
 
 test "range"
@@ -1194,6 +1220,10 @@ test "range"
     try testing.expect(!sanity_check.match("ba"));
     try testing.expect(!sanity_check.match("ca"));
     try testing.expect(!sanity_check.match("cb"));
+
+    const empty = try Regex.compile("[]", testing.allocator);
+    defer empty.deinit();
+    try testing.expect(!empty.match(""));
 
     const lowercase = try Regex.compile("[a-z]", testing.allocator);
     defer lowercase.deinit();
@@ -1359,6 +1389,14 @@ test "range"
     try testing.expect(!escape.match("/]"));
 
     try testing.expectError(error.UnrecognisedEscape, Regex.compile("[/p]", testing.allocator));
+    try testing.expectError(error.MismatchedOpeningSquareBracket, Regex.compile("[", testing.allocator));
+    try testing.expectError(error.MismatchedOpeningSquareBracket, Regex.compile("[a", testing.allocator));
+    try testing.expectError(error.MismatchedOpeningSquareBracket, Regex.compile("[/]", testing.allocator));
+    try testing.expectError(error.MismatchedClosingSquareBracket, Regex.compile("]", testing.allocator));
+    try testing.expectError(error.MismatchedClosingSquareBracket, Regex.compile("]a", testing.allocator));
+    try testing.expectError(error.MismatchedClosingSquareBracket, Regex.compile("/[]", testing.allocator));
+    try testing.expectError(error.ReversedRange, Regex.compile("[z-a]", testing.allocator));
+
 }
 
 //MIT License
