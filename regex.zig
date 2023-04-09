@@ -12,6 +12,20 @@ fn memContains(comptime T: type, mem: []const T, target: T) bool
 }
 
 
+const ParseError = error
+{
+    BinaryOpWithOneOrNoArgs,
+    UnaryOpWithNoArg,
+    MismatchedClosingParenthesis,
+    MismatchedOpeningParenthesis,
+    MismatchedClosingSquareBracket,
+    MismatchedOpeningSquareBracket,
+    UnrecognisedEscape,
+    MissingRangeBoundary,
+    ReversedRange,
+    InvalidHex,
+};
+
 const MAX_CHARS = std.math.maxInt(u8) / 2 + 1;
 
 const Symbol = union(enum)
@@ -41,44 +55,106 @@ const Operator = enum
     PLUS
 };
 
-//TODO: Do some benchmarks on large inputs to see if large memory really affects speed
+fn parseControlCode(regex_str: []const u8, at: usize) ParseError!struct{char: u8, offset: usize}
+{
+    return switch (regex_str[at])
+    {
+        'n' => .{ .char = '\n', .offset = 0 },
+        'r' => .{ .char = '\r', .offset = 0 },
+        't' => .{ .char = '\t', .offset = 0 },
+        'x' => blk: 
+        {  
+            const hex = regex_str[at + 1..at + 3];
+            const result = std.fmt.parseInt(u8, hex, 16) catch
+            {
+                return ParseError.InvalidHex;
+            };
+            break :blk .{ .char = result, .offset = 2 };
+        },
+        else => return ParseError.UnrecognisedEscape
+    };
+}
+
+//NOTE: Did some benchmarks on compiling large regular expressions with a lot of ranges,
+//and it seems to slow down a lot when mixed with the *, + and ? operators. Also, a 
+//"range set" implementation seemed to be approximately 1.5-2x, faster on average, though
+//idk whether this is worth swapping as the range set version is more complicated code wise
+//and may not matter in practical use.   
 const Range = struct
 {
     char_flags: [MAX_CHARS]bool,
 
-    pub fn init(str: []const u8) !Range
+    pub fn init(str: []const u8) ParseError!Range
     {
         var result: Range = undefined;
         std.mem.set(bool, &result.char_flags, false);
         
         var i: usize = 0; 
+        var prev_at: usize = 0;
         while (i < str.len) : (i += 1)
         { 
-            const char = str[i];
-            switch(char)
+            switch(str[i])
             {
                 '-' => 
                 {
-                    if (i == 0 or i == str.len - 1) return error.MissingRangeBoundary;
+                    if (i == 0 or i == str.len - 1) return ParseError.MissingRangeBoundary;
 
-                    const min = str[i - 1];
-                    const max = str[i + 1];
-                    if (min > max) return error.ReversedRange;
+                    //Holy shit this is ugly af hnnnngh
+                    const min = blk:
+                    {
+                        const escaped = str[i - 1];
+                        if (i - prev_at > 1 and 
+                            escaped != '-' and escaped != '/' and escaped != ']')
+                        {
+                            const cc = parseControlCode(str, prev_at + 1) catch unreachable;
+                            break :blk cc.char;
+                        }
+                        break :blk str[i - 1];
+                    };
+                        
+                    const max = blk:
+                    {
+                        if (str[i + 1] != '/') break :blk str[i + 1];
 
-                    //NOTE: The else clause should include the start and end of the range
+                        const escaped = str[i + 2];
+                        if (escaped != '-' and escaped != '/' and escaped != ']')
+                        {
+                            break :blk (try parseControlCode(str, i + 2)).char;
+                        }
+                        break :blk str[i + 2];
+                    };
+
+                    if (min > max) return ParseError.ReversedRange;
+
+                    //NOTE: The else case should include the start and end of the range
                     std.mem.set(bool, result.char_flags[min + 1..max], true);
+                    prev_at = i;
                 },
                 '/' =>
                 {
                     assert(i < str.len - 1);
 
+                    prev_at = i;
                     i += 1;
-                    if (str[i] != '-' and str[i] != '/' and str[i] != ']') 
-                        return error.UnrecognisedEscape;
+                    var next_char = str[i];
+                    if (next_char != '-' and next_char != '/' and next_char != ']') 
+                    {
+                        const cc_parse_result = try parseControlCode(str, i);
+                        next_char = cc_parse_result.char;
+                        i += cc_parse_result.offset;
+                    }
+                    else
+                    {
+                        prev_at = i;
+                    }
 
-                    result.char_flags[str[i]] = true;
+                    result.char_flags[next_char] = true;
                 },
-                else => result.char_flags[char] = true,
+                else => 
+                {
+                    result.char_flags[str[i]] = true;
+                    prev_at = i;
+                },
             }
         }
 
@@ -128,15 +204,19 @@ fn regexToPostfix(
             },
             '/' => 
             {
-                if (i == regex_str.len - 1) return error.UnrecognisedEscape;
+                if (i == regex_str.len - 1) return ParseError.UnrecognisedEscape;
+                i += 1;
 
                 const special_chars = "()|*?+./[]";
-                const next_char = regex_str[i + 1];
+                var next_char = regex_str[i];
                 if (!memContains(u8, special_chars, next_char))
-                    return error.UnrecognisedEscape;
+                {
+                    const cc_parse_result = try parseControlCode(regex_str, i);
+                    next_char = cc_parse_result.char;
+                    i += cc_parse_result.offset;
+                }
                 
                 result[result_at] = .{ .symbol = Symbol{ .char = next_char } };
-                i += 1;
                 result_at += 1;
                 last_added_is_expr = true;
                 
@@ -163,14 +243,14 @@ fn regexToPostfix(
                     result[result_at] = PostfixElement{ .op = op };
                     result_at += 1;
                 }
-                if (!found_closing_bracket) return error.MismatchedClosingParenthesis;
+                if (!found_closing_bracket) return ParseError.MismatchedClosingParenthesis;
 
                 last_added_is_expr = true;
                 if (will_concat) try stack.append(.CONCAT);
             },
             '[' =>
             {
-                if (i == regex_str.len - 1) return error.MismatchedOpeningSquareBracket;
+                if (i == regex_str.len - 1) return ParseError.MismatchedOpeningSquareBracket;
 
                 i += 1;
                 const start = i;
@@ -180,7 +260,7 @@ fn regexToPostfix(
                     i += @boolToInt(regex_str[i] == '/'); 
                 }
                 if (i == regex_str.len and (regex_str[i - 1] != ']' or regex_str[i - 2] == '/')) 
-                    return error.MismatchedOpeningSquareBracket;
+                    return ParseError.MismatchedOpeningSquareBracket;
                 const end = i;
 
                 result[result_at] = PostfixElement
@@ -194,10 +274,10 @@ fn regexToPostfix(
                                           !memContains(u8, unconcatable, regex_str[i + 1]);
                 if (range_will_concat) try stack.append(.CONCAT);
             },
-            ']' => return error.MismatchedClosingSquareBracket,
+            ']' => return ParseError.MismatchedClosingSquareBracket,
             '|' =>
             {
-                if (i == 0 or i == regex_str.len - 1) return error.BinOpWithOneArg;
+                if (i == 0 or i == regex_str.len - 1) return ParseError.BinaryOpWithOneOrNoArgs;
 
                 while (stack.items.len > 0 and 
                        stack.items[stack.items.len - 1] != .BRACKET)
@@ -211,7 +291,7 @@ fn regexToPostfix(
             },
             '*' => 
             {
-                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
+                if (i == 0 or !last_added_is_expr) return ParseError.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .KLEENE_STAR };
                 result_at += 1;
@@ -226,7 +306,7 @@ fn regexToPostfix(
             },
             '+' =>
             {
-                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
+                if (i == 0 or !last_added_is_expr) return ParseError.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .PLUS };
                 result_at += 1;
@@ -241,7 +321,7 @@ fn regexToPostfix(
             },
             '?' =>
             {
-                if (i == 0 or !last_added_is_expr) return error.UnaryOpWithNoArg;
+                if (i == 0 or !last_added_is_expr) return ParseError.UnaryOpWithNoArg;
 
                 result[result_at] = PostfixElement{ .op = .OPTIONAL };
                 result_at += 1;
@@ -270,7 +350,7 @@ fn regexToPostfix(
 
     while (stack.popOrNull()) |op|
     {
-        if (op == .BRACKET) return error.MismatchedOpeningParenthesis;
+        if (op == .BRACKET) return ParseError.MismatchedOpeningParenthesis;
         result[result_at] = PostfixElement{ .op = op };
         result_at += 1;
     }
@@ -885,8 +965,8 @@ test "bracket"
     try testing.expect(r.match("a"));
     try testing.expect(!r.match("b"));
 
-    try testing.expectError(error.MismatchedOpeningParenthesis, Regex.compile("abc(", testing.allocator));
-    try testing.expectError(error.MismatchedClosingParenthesis, Regex.compile("abc)", testing.allocator));
+    try testing.expectError(ParseError.MismatchedOpeningParenthesis, Regex.compile("abc(", testing.allocator));
+    try testing.expectError(ParseError.MismatchedClosingParenthesis, Regex.compile("abc)", testing.allocator));
 }
 
 test "or"
@@ -925,9 +1005,9 @@ test "or"
     try testing.expect(!precedence_check.match("ac"));
     try testing.expect(!precedence_check.match("acc"));
 
-    try testing.expectError(error.BinOpWithOneArg, Regex.compile("|", testing.allocator));
-    try testing.expectError(error.BinOpWithOneArg, Regex.compile("a|", testing.allocator));
-    try testing.expectError(error.BinOpWithOneArg, Regex.compile("|a", testing.allocator));
+    try testing.expectError(ParseError.BinaryOpWithOneOrNoArgs, Regex.compile("|", testing.allocator));
+    try testing.expectError(ParseError.BinaryOpWithOneOrNoArgs, Regex.compile("a|", testing.allocator));
+    try testing.expectError(ParseError.BinaryOpWithOneOrNoArgs, Regex.compile("|a", testing.allocator));
 }
 
 test "kleene star"
@@ -976,9 +1056,9 @@ test "kleene star"
     try testing.expect(!bracketed.match("aab"));
     try testing.expect(!bracketed.match("abb"));
 
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("*", testing.allocator));
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("*a", testing.allocator));
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("a?*", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("*", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("*a", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("a?*", testing.allocator));
 }
 
 test "optional"
@@ -1033,9 +1113,9 @@ test "optional"
     try testing.expect(!with_kleene_star.match("b"));
     try testing.expect(!with_kleene_star.match("abb"));
 
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("?", testing.allocator));
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("?a", testing.allocator));
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("a*?", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("?", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("?a", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("a*?", testing.allocator));
 }
 
 test "plus"
@@ -1093,9 +1173,9 @@ test "plus"
     try testing.expect(!bracketed.match("aab"));
     try testing.expect(!bracketed.match("abb"));
 
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("+", testing.allocator));
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("+a", testing.allocator));
-    try testing.expectError(error.UnaryOpWithNoArg, Regex.compile("a?+", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("+", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("+a", testing.allocator));
+    try testing.expectError(ParseError.UnaryOpWithNoArg, Regex.compile("a?+", testing.allocator));
 }
 
 test "wildcard"
@@ -1188,6 +1268,7 @@ test "wildcard"
 test "escape"
 {
     const special_chars = "()|*?+./[]";
+
     const all_together = try Regex.compile("/(/)/|/*/?/+/.///[/]", testing.allocator);
     defer all_together.deinit();
     try testing.expect(all_together.match(special_chars));
@@ -1196,8 +1277,38 @@ test "escape"
     defer individually.deinit();
     for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
 
-    try testing.expectError(error.UnrecognisedEscape, Regex.compile("/p", testing.allocator));
-    try testing.expectError(error.UnrecognisedEscape, Regex.compile("/", testing.allocator));
+
+    const control_codes = [_]u8{'\n', '\r', '\t', 0};
+
+    const control_codes_together = try Regex.compile("/n/r/t/x00", testing.allocator);
+    defer control_codes_together.deinit();
+    try testing.expect(control_codes_together.match(&control_codes));
+
+    const control_codes_individually = try Regex.compile("/n|/r|/t|/x00", testing.allocator);
+    defer control_codes_individually.deinit();
+    for (control_codes) |_, i| 
+        try testing.expect(control_codes_individually.match(control_codes[i..i+1]));
+
+    var hex: u8 = 0;
+    var regex = [_]u8{'/', 'x', 0, 0}; 
+    while (hex < MAX_CHARS) : (hex += 1)
+    {
+        var start: usize = 2;
+        if (hex < 16)
+        {
+            regex[2] = '0';
+            start += 1;
+        }
+        _ = try std.fmt.bufPrint(regex[start..4], "{x}", .{hex});
+
+        const hex_compile = try Regex.compile(&regex, testing.allocator);
+        defer hex_compile.deinit(); 
+        try testing.expect(!hex_compile.match(""));
+        try testing.expect(hex_compile.match(&[_]u8{hex}));
+    }
+
+    try testing.expectError(ParseError.UnrecognisedEscape, Regex.compile("/p", testing.allocator));
+    try testing.expectError(ParseError.UnrecognisedEscape, Regex.compile("/", testing.allocator));
 }
 
 test "range"
@@ -1377,6 +1488,22 @@ test "range"
     try testing.expect(plus.match(qwerty_lower));
     try testing.expect(!plus.match(qwerty_upper));
 
+    const special_chars = try Regex.compile("[*|?+()[.]", testing.allocator);
+    defer special_chars.deinit();
+    try testing.expect(special_chars.match("*"));
+    try testing.expect(special_chars.match("|"));
+    try testing.expect(special_chars.match("?"));
+    try testing.expect(special_chars.match("+"));
+    try testing.expect(special_chars.match("("));
+    try testing.expect(special_chars.match(")"));
+    try testing.expect(special_chars.match("["));
+    try testing.expect(special_chars.match("."));
+    try testing.expect(!special_chars.match(""));
+    try testing.expect(!special_chars.match("]"));
+    try testing.expect(!special_chars.match("-"));
+    try testing.expect(!special_chars.match("/"));
+
+
     const escape = try Regex.compile("[/-///]]", testing.allocator);
     defer escape.deinit();
     try testing.expect(escape.match("-"));
@@ -1388,14 +1515,34 @@ test "range"
     try testing.expect(!escape.match("-]"));
     try testing.expect(!escape.match("/]"));
 
-    try testing.expectError(error.UnrecognisedEscape, Regex.compile("[/p]", testing.allocator));
-    try testing.expectError(error.MismatchedOpeningSquareBracket, Regex.compile("[", testing.allocator));
-    try testing.expectError(error.MismatchedOpeningSquareBracket, Regex.compile("[a", testing.allocator));
-    try testing.expectError(error.MismatchedOpeningSquareBracket, Regex.compile("[/]", testing.allocator));
-    try testing.expectError(error.MismatchedClosingSquareBracket, Regex.compile("]", testing.allocator));
-    try testing.expectError(error.MismatchedClosingSquareBracket, Regex.compile("]a", testing.allocator));
-    try testing.expectError(error.MismatchedClosingSquareBracket, Regex.compile("/[]", testing.allocator));
-    try testing.expectError(error.ReversedRange, Regex.compile("[z-a]", testing.allocator));
+    const escape_range = try Regex.compile("[//-/]]", testing.allocator);
+    defer escape_range.deinit();
+    try testing.expect(!escape_range.match("")); 
+    var char: u8 = '/';
+    while (char <= ']') : (char += 1) try testing.expect(escape_range.match(&[_]u8{char}));
+
+    const control_codes = [_]u8{'\n', '\r', '\t', 0};
+
+    const control_code_range = try Regex.compile("[/n/r/t/x00]", testing.allocator);
+    defer control_code_range.deinit();
+    for (control_codes) |_, i| 
+        try testing.expect(control_code_range.match(control_codes[i..i+1]));
+
+    const hex_range = try Regex.compile("[/x00-/x7F]", testing.allocator);
+    defer hex_range.deinit();
+    try testing.expect(!hex_range.match("")); 
+    var hex: u8 = 0;
+    while (hex < MAX_CHARS) : (hex += 1) try testing.expect(hex_range.match(&[_]u8{hex})); 
+
+
+    try testing.expectError(ParseError.UnrecognisedEscape, Regex.compile("[/p]", testing.allocator));
+    try testing.expectError(ParseError.MismatchedOpeningSquareBracket, Regex.compile("[", testing.allocator));
+    try testing.expectError(ParseError.MismatchedOpeningSquareBracket, Regex.compile("[a", testing.allocator));
+    try testing.expectError(ParseError.MismatchedOpeningSquareBracket, Regex.compile("[/]", testing.allocator));
+    try testing.expectError(ParseError.MismatchedClosingSquareBracket, Regex.compile("]", testing.allocator));
+    try testing.expectError(ParseError.MismatchedClosingSquareBracket, Regex.compile("]a", testing.allocator));
+    try testing.expectError(ParseError.MismatchedClosingSquareBracket, Regex.compile("/[]", testing.allocator));
+    try testing.expectError(ParseError.ReversedRange, Regex.compile("[z-a]", testing.allocator));
 
 }
 

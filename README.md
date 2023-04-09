@@ -46,7 +46,13 @@ pub fn main() !void
  * `[]` - represents any of the characters inside these brackets (e.g., `[abc]` would mean 'a', 'b' or 'c').
   * `-` - use inside square brackets to denote a range of characters (e.g., `[a-z]` would mean any character from 'a' to 'z').
 
- If you wish to use any of the characters that usually denote an operator, character class, or any other special meaning in general. You can use `/` before such a character as an 'escape' (e.g., `/*` would match "*").  
+ `/` is an escape character, it can be used to escape any character that would normally represent an operator or character class* (e.g., `/*` would match "*"), and can also represent the following control codes:
+ * `/n` - recognises new line ascii character.
+ * `/r` - recognises return carriage ascii character.
+ * `/t` - recognises tab ascii character.
+
+ *Note: What requires escaping depends one whether you're inside `[]` or not. For example,
+ `*` does not need escaping when inside `[]`, but `-` does.
 
 ## Features to be added
  * Substring matching
