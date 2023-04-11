@@ -680,7 +680,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
             
             //Get row index of next state set
             var next_state_set_row: ?usize = null;
-            for (state_sets.items) |set, i|
+            for (state_sets.items, 0..) |set, i|
             {
                 if (set.eql(next_state_set)) 
                 {
@@ -712,7 +712,7 @@ fn NFAtoDFA(nfa: NFA, allocator: std.mem.Allocator) !DFA
     }; 
 
     //Fill out the final state map by finding all state sets which have a final state in them
-    for (state_sets.items) |set, set_index|
+    for (state_sets.items, 0..) |set, set_index|
     {
         var states = set.iterator(.{});
         while (states.next()) |state_id| 
@@ -746,6 +746,7 @@ pub const Regex = struct
         return Regex{ .dfa = try NFAtoDFA(nfa, allocator), .allocator = allocator };
     }
 
+    //Returns true if entirety of 'str' matches the regular expression, else false.
     pub fn match(self: Regex, str: []const u8) bool
     {
         var current_state: usize = 0;
@@ -755,6 +756,30 @@ pub const Regex = struct
             if (transition) |next_state| current_state = next_state else return false;
         }
         return self.dfa.final_state_map[current_state];
+    }
+
+    //Returns true if any substring of 'str' matches the regular expression, else false.
+    pub fn substringMatch(self: Regex, str: []const u8) bool
+    {
+        for (str, 0..) |front_char, i|
+        {
+            const first_transition = self.dfa.table[0][front_char];
+            if (first_transition != null)
+            {
+                var current_state: usize = 0;
+                for(str[i..]) |input_char|
+                {
+                    if (self.dfa.final_state_map[current_state]) return true;
+
+                    const transition = self.dfa.table[current_state][input_char];   
+                    if (transition) |next_state| current_state = next_state else break;
+                }
+
+                if (self.dfa.final_state_map[current_state]) return true;
+            }
+        }
+
+        return false;
     }
 
     pub fn deinit(self: Regex) void
@@ -819,7 +844,7 @@ test "regexToPostfix"
 
 fn nfaHasDuplicateIDs(nfa: NFA) bool
 {
-    for (nfa.state_pool) |a, i|
+    for (nfa.state_pool, 0..) |a, i|
     {
         for (nfa.state_pool[i+1..nfa.state_pool.len]) |b| 
         {
@@ -1015,7 +1040,7 @@ test "kleene star"
     const sanity_check = try Regex.compile("a*", testing.allocator);
     defer sanity_check.deinit();
     const aaaaaa = "a" ** 100;
-    for (aaaaaa) |_, i| try testing.expect(sanity_check.match(aaaaaa[0..i]));
+    for (0..aaaaaa.len) |i| try testing.expect(sanity_check.match(aaaaaa[0..i]));
     try testing.expect(sanity_check.match(aaaaaa));
     try testing.expect(!sanity_check.match("b"));
     try testing.expect(!sanity_check.match("ab"));
@@ -1024,7 +1049,7 @@ test "kleene star"
     const start_concat = try Regex.compile("ab*", testing.allocator);
     defer start_concat.deinit();
     const abbbbb = "a" ++ "b" ** 100;
-    for (abbbbb) |_, i| try testing.expect(start_concat.match(abbbbb[0..i + 1]));
+    for (0..abbbbb.len) |i| try testing.expect(start_concat.match(abbbbb[0..i + 1]));
     try testing.expect(!start_concat.match(""));
     try testing.expect(!start_concat.match("b"));
     try testing.expect(!start_concat.match("aa"));
@@ -1034,7 +1059,7 @@ test "kleene star"
     const end_concat = try Regex.compile("a*b", testing.allocator);
     defer end_concat.deinit();
     const aaaaab = aaaaaa ++ "b";
-    for (aaaaab) |_, i| 
+    for (0..aaaaab.len) |i| 
         try testing.expect(end_concat.match(aaaaab[aaaaab.len - i - 1..aaaaab.len]));
     try testing.expect(!end_concat.match(""));
     try testing.expect(!end_concat.match("a"));
@@ -1123,7 +1148,7 @@ test "plus"
     const sanity_check = try Regex.compile("a+", testing.allocator);
     defer sanity_check.deinit();
     const aaaaaa = "a" ** 100;
-    for (aaaaaa) |_, i| try testing.expect(sanity_check.match(aaaaaa[0..i+1]));
+    for (0..aaaaaa.len) |i| try testing.expect(sanity_check.match(aaaaaa[0..i+1]));
     try testing.expect(!sanity_check.match(""));
     try testing.expect(!sanity_check.match("b"));
     try testing.expect(!sanity_check.match("ab"));
@@ -1240,9 +1265,9 @@ test "wildcard"
     }
     {
         var input: [MAX_CHARS]u8 = undefined;
-        for (input) |*c, i| c.* = @intCast(u8, i);
+        for (&input, 0..) |*c, i| c.* = @intCast(u8, i);
         try testing.expect(with_star.match(&input));
-        for (input) |*c, i| c.* = @intCast(u8, MAX_CHARS - i - 1);
+        for (&input, 0..) |*c, i| c.* = @intCast(u8, MAX_CHARS - i - 1);
         try testing.expect(with_star.match(&input));
     }
     try testing.expect(with_star.match(""));
@@ -1257,9 +1282,9 @@ test "wildcard"
     }
     {
         var input: [MAX_CHARS]u8 = undefined;
-        for (input) |*c, i| c.* = @intCast(u8, i);
+        for (&input, 0..) |*c, i| c.* = @intCast(u8, i);
         try testing.expect(with_plus.match(&input));
-        for (input) |*c, i| c.* = @intCast(u8, MAX_CHARS - i - 1);
+        for (&input, 0..) |*c, i| c.* = @intCast(u8, MAX_CHARS - i - 1);
         try testing.expect(with_plus.match(&input));
     }
     try testing.expect(!with_plus.match(""));
@@ -1275,7 +1300,8 @@ test "escape"
 
     const individually = try Regex.compile("/(|/)|/||/*|/?|/+|/.|//|/[|/]", testing.allocator);
     defer individually.deinit();
-    for (special_chars) |_, i| try testing.expect(individually.match(special_chars[i..i+1]));
+    for (0..special_chars.len) |i| 
+        try testing.expect(individually.match(special_chars[i..i+1]));
 
 
     const control_codes = [_]u8{'\n', '\r', '\t', 0};
@@ -1286,7 +1312,7 @@ test "escape"
 
     const control_codes_individually = try Regex.compile("/n|/r|/t|/x00", testing.allocator);
     defer control_codes_individually.deinit();
-    for (control_codes) |_, i| 
+    for (0..control_codes.len) |i| 
         try testing.expect(control_codes_individually.match(control_codes[i..i+1]));
 
     var hex: u8 = 0;
@@ -1339,20 +1365,19 @@ test "range"
     const lowercase = try Regex.compile("[a-z]", testing.allocator);
     defer lowercase.deinit();
     try testing.expect(!lowercase.match(""));
-    for (alphabet_lower) |_, i| try testing.expect(lowercase.match(alphabet_lower[i..i+1]));
-    for (qwerty_lower)   |_, i| try testing.expect(lowercase.match(qwerty_lower[i..i+1]));
-    for (alphabet_upper) |_, i| try testing.expect(!lowercase.match(alphabet_upper[i..i+1]));
-    for (qwerty_upper)   |_, i| try testing.expect(!lowercase.match(qwerty_upper[i..i+1]));
-    for (digits) |_, i| try testing.expect(!lowercase.match(digits[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(lowercase.match(alphabet_lower[i..i+1]));
+    for (0..qwerty_lower.len)   |i| try testing.expect(lowercase.match(qwerty_lower[i..i+1]));
+    for (0..alphabet_upper.len) |i|  try testing.expect(!lowercase.match(alphabet_upper[i..i+1]));
+    for (0..qwerty_upper.len)   |i| try testing.expect(!lowercase.match(qwerty_upper[i..i+1]));
+    for (0..digits.len) |i| try testing.expect(!lowercase.match(digits[i..i+1]));
     {
         var input = [_]u8{0};
         while (input[0] < MAX_CHARS) : (input[0] += 1)
         {
-            const slice = input[0..];
             if (std.ascii.isLower(input[0])) {
-                try testing.expect(lowercase.match(slice));
+                try testing.expect(lowercase.match(&input));
             } else {
-                try testing.expect(!lowercase.match(slice));
+                try testing.expect(!lowercase.match(&input));
             }
         }
     }
@@ -1360,20 +1385,19 @@ test "range"
     const uppercase = try Regex.compile("[A-Z]", testing.allocator);
     defer uppercase.deinit();
     try testing.expect(!uppercase.match(""));
-    for (alphabet_lower) |_, i| try testing.expect(!uppercase.match(alphabet_lower[i..i+1]));
-    for (qwerty_lower)   |_, i| try testing.expect(!uppercase.match(qwerty_lower[i..i+1]));
-    for (alphabet_upper) |_, i| try testing.expect(uppercase.match(alphabet_upper[i..i+1]));
-    for (qwerty_upper)   |_, i| try testing.expect(uppercase.match(qwerty_upper[i..i+1]));
-    for (digits) |_, i| try testing.expect(!uppercase.match(digits[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(!uppercase.match(alphabet_lower[i..i+1]));
+    for (0..qwerty_lower.len)   |i| try testing.expect(!uppercase.match(qwerty_lower[i..i+1]));
+    for (0..alphabet_upper.len) |i| try testing.expect(uppercase.match(alphabet_upper[i..i+1]));
+    for (0..qwerty_upper.len)   |i| try testing.expect(uppercase.match(qwerty_upper[i..i+1]));
+    for (0..digits.len) |i| try testing.expect(!uppercase.match(digits[i..i+1]));
     {
         var input = [_]u8{0};
         while (input[0] < MAX_CHARS) : (input[0] += 1)
         {
-            const slice = input[0..];
             if (std.ascii.isUpper(input[0])) {
-                try testing.expect(uppercase.match(slice));
+                try testing.expect(uppercase.match(&input));
             } else {
-                try testing.expect(!uppercase.match(slice));
+                try testing.expect(!uppercase.match(&input));
             }
         }
     }
@@ -1381,20 +1405,19 @@ test "range"
     const numeric = try Regex.compile("[0-9]", testing.allocator);
     defer numeric.deinit();
     try testing.expect(!numeric.match(""));
-    for (alphabet_lower) |_, i| try testing.expect(!numeric.match(alphabet_lower[i..i+1]));
-    for (qwerty_lower)   |_, i| try testing.expect(!numeric.match(qwerty_lower[i..i+1]));
-    for (alphabet_upper) |_, i| try testing.expect(!numeric.match(alphabet_upper[i..i+1]));
-    for (qwerty_upper)   |_, i| try testing.expect(!numeric.match(qwerty_upper[i..i+1]));
-    for (digits) |_, i| try testing.expect(numeric.match(digits[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(!numeric.match(alphabet_lower[i..i+1]));
+    for (0..qwerty_lower.len)   |i| try testing.expect(!numeric.match(qwerty_lower[i..i+1]));
+    for (0..alphabet_upper.len) |i| try testing.expect(!numeric.match(alphabet_upper[i..i+1]));
+    for (0..qwerty_upper.len)   |i| try testing.expect(!numeric.match(qwerty_upper[i..i+1]));
+    for (0..digits.len) |i| try testing.expect(numeric.match(digits[i..i+1]));
     {
         var input = [_]u8{0};
         while (input[0] < MAX_CHARS) : (input[0] += 1)
         {
-            const slice = input[0..];
             if (std.ascii.isDigit(input[0])) {
-                try testing.expect(numeric.match(slice));
+                try testing.expect(numeric.match(&input));
             } else {
-                try testing.expect(!numeric.match(slice));
+                try testing.expect(!numeric.match(&input));
             }
         }
     }
@@ -1402,20 +1425,19 @@ test "range"
     const letter = try Regex.compile("[a-zA-Z]", testing.allocator);
     defer letter.deinit();
     try testing.expect(!letter.match(""));
-    for (alphabet_lower) |_, i| try testing.expect(letter.match(alphabet_lower[i..i+1]));
-    for (qwerty_lower)   |_, i| try testing.expect(letter.match(qwerty_lower[i..i+1]));
-    for (alphabet_upper) |_, i| try testing.expect(letter.match(alphabet_upper[i..i+1]));
-    for (qwerty_upper)   |_, i| try testing.expect(letter.match(qwerty_upper[i..i+1]));
-    for (digits) |_, i| try testing.expect(!letter.match(digits[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(letter.match(alphabet_lower[i..i+1]));
+    for (0..qwerty_lower.len)   |i| try testing.expect(letter.match(qwerty_lower[i..i+1]));
+    for (0..alphabet_upper.len) |i| try testing.expect(letter.match(alphabet_upper[i..i+1]));
+    for (0..qwerty_upper.len)   |i| try testing.expect(letter.match(qwerty_upper[i..i+1]));
+    for (0..digits.len) |i| try testing.expect(!letter.match(digits[i..i+1]));
     {
         var input = [_]u8{0};
         while (input[0] < MAX_CHARS) : (input[0] += 1)
         {
-            const slice = input[0..];
             if (std.ascii.isAlphabetic(input[0])) {
-                try testing.expect(letter.match(slice));
+                try testing.expect(letter.match(&input));
             } else {
-                try testing.expect(!letter.match(slice));
+                try testing.expect(!letter.match(&input));
             }
         }
     }
@@ -1423,20 +1445,19 @@ test "range"
     const alphanumeric = try Regex.compile("[a-zA-Z0-9]", testing.allocator);
     defer alphanumeric.deinit();
     try testing.expect(!letter.match(""));
-    for (alphabet_lower) |_, i| try testing.expect(alphanumeric.match(alphabet_lower[i..i+1]));
-    for (qwerty_lower)   |_, i| try testing.expect(alphanumeric.match(qwerty_lower[i..i+1]));
-    for (alphabet_upper) |_, i| try testing.expect(alphanumeric.match(alphabet_upper[i..i+1]));
-    for (qwerty_upper)   |_, i| try testing.expect(alphanumeric.match(qwerty_upper[i..i+1]));
-    for (digits) |_, i| try testing.expect(alphanumeric.match(digits[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(alphanumeric.match(alphabet_lower[i..i+1]));
+    for (0..qwerty_lower.len)   |i| try testing.expect(alphanumeric.match(qwerty_lower[i..i+1]));
+    for (0..alphabet_upper.len) |i| try testing.expect(alphanumeric.match(alphabet_upper[i..i+1]));
+    for (0..qwerty_upper.len)   |i| try testing.expect(alphanumeric.match(qwerty_upper[i..i+1]));
+    for (0..digits.len) |i| try testing.expect(alphanumeric.match(digits[i..i+1]));
     {
         var input = [_]u8{0};
         while (input[0] < MAX_CHARS) : (input[0] += 1)
         {
-            const slice = input[0..];
             if (std.ascii.isAlphanumeric(input[0])) {
-                try testing.expect(alphanumeric.match(slice));
+                try testing.expect(alphanumeric.match(&input));
             } else {
-                try testing.expect(!alphanumeric.match(slice));
+                try testing.expect(!alphanumeric.match(&input));
             }
         }
     }
@@ -1460,19 +1481,19 @@ test "range"
     defer disjunct.deinit();
     try testing.expect(!disjunct.match(""));
     try testing.expect(disjunct.match("A"));
-    for (alphabet_lower) |_, i| try testing.expect(disjunct.match(alphabet_lower[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(disjunct.match(alphabet_lower[i..i+1]));
 
     const optional = try Regex.compile("[a-z]?", testing.allocator);
     defer optional.deinit();
     try testing.expect(optional.match(""));
     try testing.expect(!optional.match("A"));
-    for (alphabet_lower) |_, i| try testing.expect(optional.match(alphabet_lower[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(optional.match(alphabet_lower[i..i+1]));
 
     const star = try Regex.compile("[a-z]*", testing.allocator);
     defer star.deinit();
     try testing.expect(star.match(""));
     try testing.expect(!star.match("A"));
-    for (alphabet_lower) |_, i| try testing.expect(star.match(alphabet_lower[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(star.match(alphabet_lower[i..i+1]));
     try testing.expect(star.match(alphabet_lower));
     try testing.expect(!star.match(alphabet_upper));
     try testing.expect(star.match(qwerty_lower));
@@ -1482,7 +1503,7 @@ test "range"
     defer plus.deinit();
     try testing.expect(!plus.match(""));
     try testing.expect(!plus.match("A"));
-    for (alphabet_lower) |_, i| try testing.expect(star.match(alphabet_lower[i..i+1]));
+    for (0..alphabet_lower.len) |i| try testing.expect(star.match(alphabet_lower[i..i+1]));
     try testing.expect(plus.match(alphabet_lower));
     try testing.expect(!plus.match(alphabet_upper));
     try testing.expect(plus.match(qwerty_lower));
@@ -1525,7 +1546,7 @@ test "range"
 
     const control_code_range = try Regex.compile("[/n/r/t/x00]", testing.allocator);
     defer control_code_range.deinit();
-    for (control_codes) |_, i| 
+    for (0..control_codes.len) |i| 
         try testing.expect(control_code_range.match(control_codes[i..i+1]));
 
     const hex_range = try Regex.compile("[/x00-/x7F]", testing.allocator);
@@ -1544,6 +1565,24 @@ test "range"
     try testing.expectError(ParseError.MismatchedClosingSquareBracket, Regex.compile("/[]", testing.allocator));
     try testing.expectError(ParseError.ReversedRange, Regex.compile("[z-a]", testing.allocator));
 
+}
+
+test "substring match"
+{
+    const rx = try Regex.compile("ab", testing.allocator);
+    defer rx.deinit();
+    try testing.expect(rx.substringMatch("abc"));
+    try testing.expect(rx.substringMatch("aaaaaaaaaaaaaaab"));
+    try testing.expect(rx.substringMatch("aaaaaaaabaaaaaaa"));
+    try testing.expect(rx.substringMatch("abababababababab"));
+    try testing.expect(rx.substringMatch("jihpehkthe;jabehtiiiiiiiipor"));
+    try testing.expect(!rx.substringMatch(""));
+    try testing.expect(!rx.substringMatch("a"));
+    try testing.expect(!rx.substringMatch("b"));
+    try testing.expect(!rx.substringMatch("aa"));
+    try testing.expect(!rx.substringMatch("bb"));
+    try testing.expect(!rx.substringMatch("baaaaaaaaaaaaaaa"));
+    try testing.expect(!rx.substringMatch("r8tg59h8a6b0j4kiupaoejrwhery09wbhj0kpl,a"));
 }
 
 //MIT License
