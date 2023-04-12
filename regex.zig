@@ -782,6 +782,36 @@ pub const Regex = struct
         return false;
     }
 
+    //Returns all substrings of 'str' that match the regular expression.
+    //NOTE: This does not return the empty string as a substring
+    //TODO: Benchmark, and if it's too slow find a better method
+    pub fn matchingSubstrings(self: Regex, str: []const u8, allocator: std.mem.Allocator) ![][]u8 
+    {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        var arena_allocator = arena.allocator();
+
+        var substring_map = std.StringArrayHashMap(void).init(arena_allocator);
+        var matching_substrings = std.ArrayList([]u8).init(arena_allocator);
+        for (0..str.len) |start|
+        {
+            for (start..str.len) |end|
+            {
+                //I wish I didn't have to do this allocation
+                var substring = try arena_allocator.dupe(u8, str[start..end+1]);
+                if (!substring_map.contains(substring))
+                {
+                    try substring_map.put(substring, {});
+                    if(self.match(substring)) try matching_substrings.append(substring);
+                }
+            }
+        }
+
+        var result = try allocator.dupe([]u8, matching_substrings.items);
+        for (result) |*ptr| ptr.* = try allocator.dupe(u8, ptr.*);
+        return result;
+    }
+
     pub fn deinit(self: Regex) void
     {
         self.allocator.free(self.dfa.table);
@@ -1583,6 +1613,62 @@ test "substring match"
     try testing.expect(!rx.substringMatch("bb"));
     try testing.expect(!rx.substringMatch("baaaaaaaaaaaaaaa"));
     try testing.expect(!rx.substringMatch("r8tg59h8a6b0j4kiupaoejrwhery09wbhj0kpl,a"));
+}
+
+test "matchingSubstrings"
+{
+    const sanity_check = try Regex.compile("a|b|c", testing.allocator);
+    defer sanity_check.deinit();
+    {
+        const substrings = try sanity_check.matchingSubstrings("abc", testing.allocator);
+        defer testing.allocator.free(substrings);
+        defer for (substrings) |str| testing.allocator.free(str);
+        try testing.expect(substrings.len == 3);
+        try testing.expect(std.mem.eql(u8, "a", substrings[0]));
+        try testing.expect(std.mem.eql(u8, "b", substrings[1]));
+        try testing.expect(std.mem.eql(u8, "c", substrings[2]));
+    }
+    {
+        const substrings = try sanity_check.matchingSubstrings("aaa", testing.allocator);
+        defer testing.allocator.free(substrings);
+        defer for (substrings) |str| testing.allocator.free(str);
+        try testing.expect(substrings.len == 1);
+        try testing.expect(std.mem.eql(u8, "a", substrings[0]));
+    }
+
+    const kleene_star = try Regex.compile("a*", testing.allocator);
+    defer kleene_star.deinit();
+    {
+        const substrings = try kleene_star.matchingSubstrings("aaa", testing.allocator);
+        defer testing.allocator.free(substrings);
+        defer for (substrings) |str| testing.allocator.free(str);
+        try testing.expect(substrings.len == 3);
+        try testing.expect(std.mem.eql(u8, "a", substrings[0]));
+        try testing.expect(std.mem.eql(u8, "aa", substrings[1]));
+        try testing.expect(std.mem.eql(u8, "aaa", substrings[2]));
+    }
+    {
+        const substrings = try kleene_star.matchingSubstrings("aba", testing.allocator);
+        defer testing.allocator.free(substrings);
+        defer for (substrings) |str| testing.allocator.free(str);
+        try testing.expect(substrings.len == 1);
+        try testing.expect(std.mem.eql(u8, "a", substrings[0]));
+    }
+
+    const wildstar = try Regex.compile(".*", testing.allocator);
+    defer wildstar.deinit();
+    {
+        const substrings = try wildstar.matchingSubstrings("abc", testing.allocator);
+        defer testing.allocator.free(substrings);
+        defer for (substrings) |str| testing.allocator.free(str);
+        try testing.expect(substrings.len == 6);
+        try testing.expect(std.mem.eql(u8, "a",   substrings[0]));
+        try testing.expect(std.mem.eql(u8, "ab",  substrings[1]));
+        try testing.expect(std.mem.eql(u8, "abc", substrings[2]));
+        try testing.expect(std.mem.eql(u8, "b",   substrings[3]));
+        try testing.expect(std.mem.eql(u8, "bc",  substrings[4]));
+        try testing.expect(std.mem.eql(u8, "c",   substrings[5]));
+    } 
 }
 
 //MIT License
